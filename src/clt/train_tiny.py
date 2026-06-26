@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ def main() -> None:
     parser.add_argument("--method", choices=["direct", "cot", "masked_cot", "soft", "latent"], default="direct")
     parser.add_argument("--data-dir", type=Path, default=Path("data/phase1a_smoke"))
     parser.add_argument("--build-data", action="store_true")
-    parser.add_argument("--difficulty", choices=["standard", "easy"], default="standard")
+    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder"], default="standard")
     parser.add_argument("--device", default="cpu", help="cpu or npu:0")
     parser.add_argument("--eval-mode", choices=["generate", "binary_choice"], default="generate")
     parser.add_argument("--steps", type=int, default=80)
@@ -37,6 +38,9 @@ def main() -> None:
         help="Comma-separated fixed node counts for graph_reachability/easy diagnostic evaluation.",
     )
     parser.add_argument("--diagnostic-examples", type=int, default=0)
+    parser.add_argument("--save-checkpoint", type=Path, default=None)
+    parser.add_argument("--load-checkpoint", type=Path, default=None)
+    parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -61,30 +65,56 @@ def main() -> None:
     id_examples = read_jsonl(dataset_path(args.data_dir, "id_test", args.task))
     ood_examples = read_jsonl(dataset_path(args.data_dir, "ood_test", args.task))
 
-    tokenizer = build_tokenizer(train_examples + dev_examples + id_examples + ood_examples)
     from .tiny_model import TinyDecoder, TinyDecoderConfig
 
-    model = TinyDecoder(
-        TinyDecoderConfig(
+    checkpoint = None
+    if args.load_checkpoint is not None:
+        checkpoint = torch.load(args.load_checkpoint, map_location="cpu")
+        tokenizer = CharTokenizer(checkpoint["tokenizer"])
+        config = TinyDecoderConfig(**checkpoint["model_config"])
+    else:
+        tokenizer = build_tokenizer(train_examples + dev_examples + id_examples + ood_examples)
+        config = TinyDecoderConfig(
             vocab_size=tokenizer.vocab_size,
             d_model=args.d_model,
             n_layers=args.n_layers,
             n_heads=args.n_heads,
         )
-    ).to(args.device)
+    model = TinyDecoder(config)
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model_state"])
+    model = model.to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     start_time = time.time()
     losses = []
-    for step in range(1, args.steps + 1):
-        example = random.choice(train_examples)
-        loss = _loss_for_example(model, tokenizer, example, args.method, args.k, args.device)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-        losses.append(float(loss.detach().cpu()))
-        if step == 1 or step % max(1, args.steps // 4) == 0:
-            print({"step": step, "loss": round(losses[-1], 4)}, flush=True)
+    if not args.eval_only:
+        for step in range(1, args.steps + 1):
+            example = random.choice(train_examples)
+            loss = _loss_for_example(model, tokenizer, example, args.method, args.k, args.device)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.detach().cpu()))
+            if step == 1 or step % max(1, args.steps // 4) == 0:
+                print({"step": step, "loss": round(losses[-1], 4)}, flush=True)
+
+    if args.save_checkpoint is not None:
+        args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+                "model_config": asdict(config),
+                "tokenizer": tokenizer.token_to_id,
+                "task": args.task,
+                "method": args.method,
+                "difficulty": args.difficulty,
+                "k": args.k if args.method in {"soft", "latent"} else None,
+                "steps": args.steps,
+                "seed": args.seed,
+            },
+            args.save_checkpoint,
+        )
 
     metrics = {
         "task": args.task,
@@ -93,8 +123,10 @@ def main() -> None:
         "eval_mode": args.eval_mode,
         "steps": args.steps,
         "k": args.k if args.method in {"soft", "latent"} else None,
-        "train_loss_last": losses[-1],
+        "train_loss_last": losses[-1] if losses else None,
         "elapsed_sec": round(time.time() - start_time, 3),
+        "checkpoint_loaded": str(args.load_checkpoint) if args.load_checkpoint is not None else None,
+        "checkpoint_saved": str(args.save_checkpoint) if args.save_checkpoint is not None else None,
         "dev": evaluate(
             model,
             tokenizer,
@@ -278,8 +310,8 @@ def _is_binary_answer_set(examples: list[Example]) -> bool:
 def _run_diagnostics(model, tokenizer: CharTokenizer, args) -> dict:
     if not args.easy_graph_diagnostic_nodes or args.diagnostic_examples <= 0:
         return {}
-    if args.task != "graph_reachability" or args.difficulty != "easy":
-        raise ValueError("--easy-graph-diagnostic-nodes is only supported for graph_reachability/easy")
+    if args.task != "graph_reachability" or args.difficulty not in {"easy", "easy_ladder"}:
+        raise ValueError("--easy-graph-diagnostic-nodes is only supported for graph_reachability easy variants")
 
     diagnostics = {}
     for raw_n in args.easy_graph_diagnostic_nodes.split(","):
@@ -288,7 +320,7 @@ def _run_diagnostics(model, tokenizer: CharTokenizer, args) -> dict:
             continue
         n = int(raw_n)
         examples = [
-            generate_easy_graph_reachability_fixed_nodes(4_000_000 + n * 10_000 + i, n=n)
+            generate_easy_graph_reachability_fixed_nodes(4_000_000 + n * 10_000 + i, n=n, difficulty=args.difficulty)
             for i in range(args.diagnostic_examples)
         ]
         diagnostics[f"easy_n{n}"] = evaluate(

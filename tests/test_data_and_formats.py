@@ -18,6 +18,19 @@ def test_build_split_accepts_easy_difficulty(tmp_path):
     assert all(example.metadata["difficulty"] == "easy" for example in examples)
 
 
+def test_easy_ladder_uses_size_curriculum_and_balanced_labels(tmp_path):
+    train_path = build_split(tmp_path, "graph_reachability", "train", 12, seed_start=0, difficulty="easy_ladder")
+    ood_path = build_split(tmp_path, "graph_reachability", "ood_test", 8, seed_start=0, difficulty="easy_ladder")
+
+    train_examples = read_jsonl(train_path)
+    ood_examples = read_jsonl(ood_path)
+
+    assert {example.metadata["num_nodes"] for example in train_examples} == {4, 5, 6}
+    assert {example.metadata["num_nodes"] for example in ood_examples} == {7, 8}
+    assert {example.answer for example in train_examples} == {"YES", "NO"}
+    assert all(example.metadata["difficulty"] == "easy_ladder" for example in train_examples + ood_examples)
+
+
 def test_fixed_node_easy_graph_diagnostic_examples():
     example = generate_easy_graph_reachability_fixed_nodes(seed=123, n=7)
     assert example.metadata["num_nodes"] == 7

@@ -40,6 +40,8 @@ def generate_example(task: TaskName, seed: int, split: str = "train", difficulty
     if task == "graph_reachability":
         if difficulty == "easy":
             return _generate_easy_graph_reachability(rng, seed, split, ood)
+        if difficulty == "easy_ladder":
+            return _generate_easy_ladder_graph_reachability(rng, seed, split, ood)
         return _generate_graph_reachability(rng, seed, split, ood)
     if task == "shortest_path":
         return _generate_shortest_path(rng, seed, split, ood)
@@ -53,7 +55,7 @@ def generate_example(task: TaskName, seed: int, split: str = "train", difficulty
 def _validate_difficulty(task: TaskName, difficulty: str) -> None:
     if difficulty == "standard":
         return
-    if task == "graph_reachability" and difficulty == "easy":
+    if task == "graph_reachability" and difficulty in {"easy", "easy_ladder"}:
         return
     raise ValueError(f"Unsupported difficulty={difficulty!r} for task={task!r}")
 
@@ -206,18 +208,53 @@ def _generate_easy_graph_reachability(rng: random.Random, seed: int, split: str,
     return _generate_easy_graph_reachability_fixed_n(rng, seed, split, n, distractor_edges=2 if ood else 1)
 
 
-def generate_easy_graph_reachability_fixed_nodes(seed: int, n: int, split: str = "diagnostic") -> Example:
+def _generate_easy_ladder_graph_reachability(rng: random.Random, seed: int, split: str, ood: bool) -> Example:
+    node_choices = [7, 8] if ood else [4, 5, 6]
+    n = node_choices[seed % len(node_choices)]
+    reachable = (seed // len(node_choices)) % 2 == 0
+    return _generate_easy_graph_reachability_fixed_n(
+        rng,
+        seed,
+        split,
+        n,
+        distractor_edges=2,
+        reachable=reachable,
+        difficulty="easy_ladder",
+    )
+
+
+def generate_easy_graph_reachability_fixed_nodes(
+    seed: int,
+    n: int,
+    split: str = "diagnostic",
+    reachable: bool | None = None,
+    difficulty: str = "easy",
+) -> Example:
     if n < 4:
         raise ValueError("easy graph reachability diagnostics require n >= 4")
     rng = random.Random(seed)
-    return _generate_easy_graph_reachability_fixed_n(rng, seed, split, n, distractor_edges=2)
+    return _generate_easy_graph_reachability_fixed_n(
+        rng,
+        seed,
+        split,
+        n,
+        distractor_edges=2,
+        reachable=reachable,
+        difficulty=difficulty,
+    )
 
 
 def _generate_easy_graph_reachability_fixed_n(
-    rng: random.Random, seed: int, split: str, n: int, distractor_edges: int
+    rng: random.Random,
+    seed: int,
+    split: str,
+    n: int,
+    distractor_edges: int,
+    reachable: bool | None = None,
+    difficulty: str = "easy",
 ) -> Example:
     source, target = 0, n - 1
-    reachable = rng.random() < 0.5
+    reachable = rng.random() < 0.5 if reachable is None else reachable
     edges: set[tuple[int, int]] = set()
 
     if reachable:
@@ -259,7 +296,7 @@ def _generate_easy_graph_reachability_fixed_n(
         answer=answer,
         metadata={
             "task": "graph_reachability",
-            "difficulty": "easy",
+            "difficulty": difficulty,
             "split": split,
             "seed": seed,
             "num_nodes": n,
@@ -552,7 +589,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate CLT synthetic task data as JSONL.")
     parser.add_argument("--task", choices=[*list_tasks(), "all"], default="all")
     parser.add_argument("--split", choices=["train", "dev", "id_test", "ood_test"], default="train")
-    parser.add_argument("--difficulty", choices=["standard", "easy"], default="standard")
+    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder"], default="standard")
     parser.add_argument("--num-examples", type=int, default=100)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--out-dir", type=Path, default=Path("data/debug"))

@@ -90,7 +90,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Materialize CLT synthetic train/dev/test splits.")
     parser.add_argument("--task", choices=[*list_tasks(), "all"], default="graph_reachability")
     parser.add_argument("--preset", choices=["smoke", "debug"], default="smoke")
-    parser.add_argument("--difficulty", choices=["standard", "easy"], default="standard")
+    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder"], default="standard")
     parser.add_argument("--out-dir", type=Path, default=Path("data/phase1a"))
     args = parser.parse_args()
 
