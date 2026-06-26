@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -23,16 +24,9 @@ class TinyDecoder(nn.Module):
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.position_embedding = nn.Embedding(config.max_seq_len, config.d_model)
-        layer = nn.TransformerEncoderLayer(
-            d_model=config.d_model,
-            nhead=config.n_heads,
-            dim_feedforward=4 * config.d_model,
-            dropout=config.dropout,
-            batch_first=True,
-            activation="gelu",
-            norm_first=True,
+        self.blocks = nn.ModuleList(
+            [TinyDecoderBlock(config.d_model, config.n_heads, config.dropout) for _ in range(config.n_layers)]
         )
-        self.transformer = nn.TransformerEncoder(layer, num_layers=config.n_layers)
         self.final_norm = nn.LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.latent_norm = nn.LayerNorm(config.d_model)
@@ -48,7 +42,8 @@ class TinyDecoder(nn.Module):
         positions = torch.arange(seq_len, device=input_embeds.device).unsqueeze(0).expand(batch_size, seq_len)
         hidden = input_embeds + self.position_embedding(positions)
         mask = _causal_mask(seq_len, input_embeds.device)
-        hidden = self.transformer(hidden, mask=mask)
+        for block in self.blocks:
+            hidden = block(hidden, mask)
         return self.final_norm(hidden)
 
     def logits_from_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -196,5 +191,52 @@ class TinyDecoder(nn.Module):
         return generated
 
 
+class TinyDecoderBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float):
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by n_heads={n_heads}")
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.mlp_norm = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Linear(4 * d_model, d_model),
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, hidden: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
+        residual = hidden
+        hidden = self.attn_norm(hidden)
+        batch_size, seq_len, d_model = hidden.shape
+        qkv = self.qkv(hidden)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = _split_heads(q, self.n_heads)
+        k = _split_heads(k, self.n_heads)
+        v = _split_heads(v, self.n_heads)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = scores.masked_fill(causal_mask, -1.0e4)
+        weights = torch.softmax(scores, dim=-1)
+        attn = torch.matmul(weights, v)
+        attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        hidden = residual + self.dropout(self.out_proj(attn))
+
+        residual = hidden
+        hidden = self.mlp_norm(hidden)
+        hidden = residual + self.dropout(self.mlp(hidden))
+        return hidden
+
+
+def _split_heads(x: torch.Tensor, n_heads: int) -> torch.Tensor:
+    batch_size, seq_len, d_model = x.shape
+    head_dim = d_model // n_heads
+    return x.view(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
+
+
 def _causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
-    return torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
+    return torch.triu(torch.ones(1, 1, seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)

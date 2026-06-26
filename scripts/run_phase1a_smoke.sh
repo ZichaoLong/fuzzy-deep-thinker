@@ -14,13 +14,13 @@ N_HEADS="${N_HEADS:-2}"
 
 mkdir -p "${OUTPUT_DIR}"
 
-PYTHONPATH=src python3 -m clt.build_dataset \
+PYTHONPATH="src:${PYTHONPATH:-}" python3 -m clt.build_dataset \
   --task "${TASK}" \
   --preset smoke \
   --out-dir "${DATA_DIR}"
 
 for method in direct cot latent; do
-  PYTHONPATH=src python3 -m clt.train_tiny \
+  PYTHONPATH="src:${PYTHONPATH:-}" python3 -m clt.train_tiny \
     --task "${TASK}" \
     --method "${method}" \
     --data-dir "${DATA_DIR}" \
@@ -35,7 +35,7 @@ for method in direct cot latent; do
     --output "${OUTPUT_DIR}/${method}.json"
 done
 
-PYTHONPATH=src python3 - <<'PY'
+PYTHONPATH="src:${PYTHONPATH:-}" python3 - <<'PY'
 import json
 from pathlib import Path
 

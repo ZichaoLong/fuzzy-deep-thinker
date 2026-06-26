@@ -15,7 +15,7 @@ LR="${LR:-0.0003}"
 
 mkdir -p "${OUTPUT_DIR}"
 
-PYTHONPATH=src python3 -m clt.build_dataset \
+PYTHONPATH="src:${PYTHONPATH:-}" python3 -m clt.build_dataset \
   --task "${TASK}" \
   --preset debug \
   --difficulty "${DIFFICULTY}" \
@@ -23,7 +23,7 @@ PYTHONPATH=src python3 -m clt.build_dataset \
 
 for steps in ${STEPS_LIST}; do
   echo "Running direct curve point: steps=${steps}"
-  PYTHONUNBUFFERED=1 PYTHONPATH=src python3 -m clt.train_tiny \
+  PYTHONUNBUFFERED=1 PYTHONPATH="src:${PYTHONPATH:-}" python3 -m clt.train_tiny \
     --task "${TASK}" \
     --method direct \
     --difficulty "${DIFFICULTY}" \
@@ -41,7 +41,7 @@ for steps in ${STEPS_LIST}; do
     2>&1 | tee "${OUTPUT_DIR}/direct_${steps}.log"
 done
 
-OUTPUT_DIR="${OUTPUT_DIR}" PYTHONPATH=src python3 - <<'PY'
+OUTPUT_DIR="${OUTPUT_DIR}" PYTHONPATH="src:${PYTHONPATH:-}" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
