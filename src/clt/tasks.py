@@ -28,6 +28,7 @@ class Example:
 def list_tasks() -> list[str]:
     return [
         "graph_reachability",
+        "pointer_chasing",
         "shortest_path",
         "maze_planning",
         "symbolic_arithmetic",
@@ -43,6 +44,8 @@ def generate_example(task: TaskName, seed: int, split: str = "train", difficulty
         if difficulty == "easy_ladder":
             return _generate_easy_ladder_graph_reachability(rng, seed, split, ood)
         return _generate_graph_reachability(rng, seed, split, ood)
+    if task == "pointer_chasing":
+        return _generate_pointer_chasing(rng, seed, split, ood)
     if task == "shortest_path":
         return _generate_shortest_path(rng, seed, split, ood)
     if task == "maze_planning":
@@ -315,6 +318,71 @@ def _graph_trace(source: int, target: int, path: list[int] | None, visit_order: 
         return f"Start at {_node_name(source)}. {hops}. {_node_name(target)} is reached."
     visited = ", ".join(_node_name(node) for node in visit_order)
     return f"Start at {_node_name(source)}. Visited nodes: {visited}. {_node_name(target)} is not reached."
+
+
+def _generate_pointer_chasing(rng: random.Random, seed: int, split: str, ood: bool) -> Example:
+    depth_choices = [5, 6, 7, 8] if ood else [2, 3, 4]
+    depth = depth_choices[seed % len(depth_choices)]
+    answer_is_yes = (seed // len(depth_choices)) % 2 == 0
+    n = 12
+
+    start = rng.randrange(n)
+    path = [start]
+    unused = [node for node in range(n) if node != start]
+    for _ in range(depth):
+        next_node = rng.choice(unused)
+        unused.remove(next_node)
+        path.append(next_node)
+
+    transitions: dict[int, int] = {}
+    for src, dst in zip(path, path[1:]):
+        transitions[src] = dst
+    for node in range(n):
+        if node not in transitions:
+            transitions[node] = rng.randrange(n)
+
+    final_state = path[-1]
+    if answer_is_yes:
+        target = final_state
+    else:
+        candidates = [node for node in range(n) if node != final_state]
+        target = rng.choice(candidates)
+
+    rules = ", ".join(f"{_node_name(src)}->{_node_name(transitions[src])}" for src in range(n))
+    answer = "YES" if target == final_state else "NO"
+    trace_steps = ". ".join(
+        f"Step {i}: {_node_name(path[i - 1])}->{_node_name(path[i])}" for i in range(1, len(path))
+    )
+    relation = "equals" if answer == "YES" else "does not equal"
+    trace = (
+        f"Start at {_node_name(start)}. {trace_steps}. "
+        f"After {depth} steps the state is {_node_name(final_state)}, which {relation} target {_node_name(target)}."
+    )
+    prompt = (
+        "You are given deterministic state transition rules.\n"
+        f"States: {_format_nodes(n)}\n"
+        f"Rules: {rules}\n"
+        f"Start: {_node_name(start)}\n"
+        f"Steps: {depth}\n"
+        f"Question: after exactly {depth} transitions, are you at {_node_name(target)}?\n"
+        "Return YES or NO."
+    )
+    return Example(
+        prompt=prompt,
+        trace=trace,
+        answer=answer,
+        metadata={
+            "task": "pointer_chasing",
+            "split": split,
+            "seed": seed,
+            "num_states": n,
+            "depth": depth,
+            "start": _node_name(start),
+            "target": _node_name(target),
+            "final_state": _node_name(final_state),
+            "reachable_target": answer == "YES",
+        },
+    )
 
 
 def _generate_shortest_path(rng: random.Random, seed: int, split: str, ood: bool) -> Example:

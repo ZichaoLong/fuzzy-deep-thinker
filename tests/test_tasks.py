@@ -27,6 +27,10 @@ def test_ood_examples_are_larger_or_deeper():
     graph_ood = generate_example("graph_reachability", seed=1, split="ood_test")
     assert graph_ood.metadata["num_nodes"] >= graph_train.metadata["num_nodes"]
 
+    pointer_train = generate_example("pointer_chasing", seed=1, split="train")
+    pointer_ood = generate_example("pointer_chasing", seed=1, split="ood_test")
+    assert pointer_ood.metadata["depth"] > pointer_train.metadata["depth"]
+
     expr_train = generate_example("symbolic_arithmetic", seed=1, split="train")
     expr_ood = generate_example("symbolic_arithmetic", seed=1, split="ood_test")
     assert expr_ood.metadata["max_depth"] > expr_train.metadata["max_depth"]
@@ -41,6 +45,16 @@ def test_easy_graph_reachability_is_small_and_binary():
     ood = generate_example("graph_reachability", seed=7, split="ood_test", difficulty="easy")
     assert ood.metadata["num_nodes"] == 6
     assert ood.answer in {"YES", "NO"}
+
+
+def test_pointer_chasing_depth_ladder_and_balanced_labels():
+    train_examples = [generate_example("pointer_chasing", seed=i, split="train") for i in range(12)]
+    ood_examples = [generate_example("pointer_chasing", seed=i, split="ood_test") for i in range(16)]
+
+    assert {example.metadata["depth"] for example in train_examples} == {2, 3, 4}
+    assert {example.metadata["depth"] for example in ood_examples} == {5, 6, 7, 8}
+    assert {example.answer for example in train_examples} == {"YES", "NO"}
+    assert {example.answer for example in ood_examples} == {"YES", "NO"}
 
 
 def test_arithmetic_answer_parser_accepts_simple_expressions():
