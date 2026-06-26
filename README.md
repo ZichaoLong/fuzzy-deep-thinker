@@ -1,5 +1,7 @@
 # Continuous Latent Thought
 
+Chinese version: [README.zh-CN.md](README.zh-CN.md)
+
 Continuous Latent Thought, abbreviated as CLT, is a research project about replacing human-readable chain-of-thought tokens with continuous internal computation steps.
 
 The central hypothesis is:
