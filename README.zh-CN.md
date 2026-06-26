@@ -46,17 +46,9 @@ prompt tokens -> K continuous thinking steps -> answer tokens
 
 ## 实验范围
 
-第一阶段全部使用 SFT，不使用 RL。
+本计划只研究 SFT 和 supervised auxiliary losses。
 
-原因是 RL 会引入额外变量：
-
-- reward 设计；
-- exploration 不稳定；
-- policy shortcut；
-- credit assignment 难度；
-- 难以判断收益来自 continuous thinking 机制还是 RL objective。
-
-第一阶段要回答的问题应尽量干净：
+这里要回答的问题应尽量干净：
 
 > 同一个 base model、同一批训练题、同样最终答案监督、相近 compute budget 下，continuous thinking 是否优于离散 CoT？
 
@@ -217,7 +209,7 @@ answer CE
 
 ## Soft Token 与 Latent Thought 的区别
 
-Soft Token 仍然绕过 vocabulary distribution：
+Soft Token 仍然经过 vocabulary distribution：
 
 ```text
 hidden state -> vocab logits -> soft vocabulary distribution -> embedding
@@ -292,15 +284,208 @@ continue_prob < threshold -> switch to answer decoding
 
 第一阶段应使用 synthetic、可自动判分的数据。
 
-推荐任务：
+建议顺序是：
 
-- graph reachability；
-- shortest path；
-- maze planning；
-- Game of 24；
-- symbolic arithmetic；
-- bAbI-style multi-hop QA；
-- simple logic problems。
+```text
+先做：graph reachability、shortest path、maze planning、symbolic arithmetic
+后做：Game of 24、bAbI-style multi-hop QA、simple logic problems
+```
+
+前四个任务更适合第一阶段，因为它们都有确定性 solver，final answer 容易自动验证，难度也容易连续调节。
+
+### Task 1: Graph Reachability
+
+这是图可达性任务。
+
+问题形式：
+
+```text
+给定一个有向图。
+Nodes: A, B, C, D, E
+Edges: A->B, B->D, C->E
+Question: Is there a path from A to D?
+Return YES or NO.
+```
+
+最终答案：
+
+```text
+YES
+```
+
+solver：
+
+```text
+从 source 到 target 做 BFS 或 DFS
+```
+
+给 Standard CoT 用的 oracle trace：
+
+```text
+Start at A. Visit B from A. Visit D from B. D is reached.
+```
+
+难度变量：
+
+- node 数量；
+- edge density；
+- 最短路径长度；
+- distractor edges 数量；
+- YES / NO 标签平衡。
+
+这个任务适合最先做，因为最终答案是二分类，判分稳定，而且 reasoning depth 可以直接用路径长度控制。
+
+### Task 2: Shortest Path
+
+这是最短路径任务。
+
+问题形式：
+
+```text
+给定一个无权有向图。
+Nodes: A, B, C, D, E
+Edges: A->B, A->C, B->D, C->D, D->E
+Question: What is the shortest path distance from A to E?
+Return an integer, or INF if unreachable.
+```
+
+最终答案：
+
+```text
+3
+```
+
+solver：
+
+```text
+无权图用 BFS
+```
+
+oracle trace：
+
+```text
+Distance(A)=0. From A set B=1 and C=1. From B set D=2. From D set E=3. The shortest distance is 3.
+```
+
+难度变量：
+
+- node 数量；
+- 最短路径长度；
+- branching factor；
+- unreachable cases；
+- 比最短路更长的 distractor paths。
+
+建议先只做无权图。加权图需要 Dijkstra，会额外引入数值计算噪声，不适合第一版。
+
+### Task 3: Maze Planning
+
+这是二维网格规划任务，本质上也是图搜索，但输入更接近空间结构。
+
+问题形式：
+
+```text
+Find the shortest path from S to G in the grid.
+S..#
+.#..
+..#G
+Return the shortest path length, or INF if no path exists.
+```
+
+最终答案：
+
+```text
+5
+```
+
+solver：
+
+```text
+把每个可走 cell 当作节点，在 grid 上做 BFS
+```
+
+oracle trace：
+
+```text
+Expand S at distance 0. Add reachable neighbors at distance 1. Continue BFS until G is reached at distance 5.
+```
+
+难度变量：
+
+- grid size；
+- wall density；
+- 最短路径长度；
+- dead ends 数量；
+- solvable / unsolvable 标签平衡。
+
+这个任务测试模型是否能在结构化输入上维护隐式状态。它比纯图可达性更接近 planning。
+
+### Task 4: Symbolic Arithmetic
+
+这是符号算术任务。
+
+问题形式：
+
+```text
+Evaluate the expression:
+((3 + 5) - 2) + 4
+Return the integer result.
+```
+
+最终答案：
+
+```text
+10
+```
+
+solver：
+
+```text
+把表达式 parse 成 AST，然后确定性求值
+```
+
+oracle trace：
+
+```text
+3 + 5 = 8. 8 - 2 = 6. 6 + 4 = 10.
+```
+
+难度变量：
+
+- expression depth；
+- 数字范围；
+- operators；
+- parentheses depth；
+- intermediate value range。
+
+建议先只用 `+`、`-` 和小整数。等训练和验证流程稳定后，再加入乘法。不要一开始就加入除法，因为答案格式和整数性会变复杂。
+
+### 后续任务
+
+Game of 24：
+
+- 输入四个数字；
+- 输出一个能得到 24 的表达式，或者 `NO SOLUTION`；
+- 用 exhaustive search 生成答案；
+- 测试时用 parser + evaluator 验证模型输出；
+- 这个任务更难，因为一个问题可能有很多合法答案。
+
+bAbI-style multi-hop QA：
+
+- 生成短故事和事实更新；
+- 问题需要检索两个或多个事实；
+- 用 symbolic state tracker 求解；
+- 适合测试语言形式的多跳推理。
+
+Simple logic：
+
+- 生成 facts 和 Horn-style rules；
+- 问一个 query 是否可以被推出；
+- 用 forward chaining 求解；
+- 用 proof depth 和 distractor rules 控制难度。
+
+这些任务应在前四个任务得到稳定训练曲线后再加入。
+
+## 数据生成
 
 每条样本保存：
 
@@ -325,6 +510,67 @@ continue_prob < threshold -> switch to answer decoding
 - 可以避免引入 teacher 的语言噪声；
 - Standard CoT baseline 更干净；
 - final answer verifier 更容易实现。
+
+具体生成流程：
+
+```text
+1. 从 difficulty config 采样任务参数。
+2. 用 random seed 生成一个 problem instance。
+3. 调用确定性 solver 得到 trace 和 answer。
+4. 保存 prompt、canonical trace、final answer、metadata、seed。
+5. 用 answer parser / verifier 检查保存的 answer 是否可判分。
+```
+
+建议第一版每个任务的数据规模：
+
+```text
+debug train:   2k examples
+debug dev:     200 examples
+main train:    50k examples
+main dev:      2k examples
+ID test:       2k examples
+OOD test:      2k examples
+```
+
+训练、dev、ID test、OOD test 使用互不重叠的 random seeds。不要先生成大量近似重复样本后再随机切分，否则 train/test 之间可能有很强近邻泄漏。
+
+建议第一版 difficulty config：
+
+| Task | Train / ID test | OOD test |
+|---|---|---|
+| Graph reachability | 6-10 个 nodes，path length 1-4，YES/NO 各 50% | 12-18 个 nodes，path length 5-8，更多 distractor edges |
+| Shortest path | 6-10 个 nodes，distance 2-5，无权图 | 12-18 个 nodes，distance 6-10，更多 distractor paths |
+| Maze planning | 5x5 到 8x8 grid，path length 4-12，wall density 0.15-0.30 | 10x10 到 14x14 grid，path length 14-28，wall density 0.20-0.35 |
+| Symbolic arithmetic | expression depth 2-4，整数 0-20，只用 `+` 和 `-` | expression depth 5-8，整数 0-50，更多括号 |
+
+建议 seed protocol：
+
+```text
+train seeds: 0 to 49,999
+dev seeds: 1,000,000 to 1,001,999
+ID test seeds: 2,000,000 to 2,001,999
+OOD test seeds: 3,000,000 to 3,001,999
+```
+
+ID test 和训练集使用相同 difficulty config，但 seed 不重叠。OOD test 使用更大、更深、更长的配置。
+
+最终答案格式要尽量 canonical：
+
+```text
+Answer: YES
+Answer: NO
+Answer: 3
+Answer: INF
+Answer: (3+5)*(6-3)
+```
+
+五种模型对同一条样本的使用方式不同：
+
+- Direct Answer 使用 `prompt` 和 `answer`；
+- Standard CoT 使用 `prompt`、`trace` 和 `answer`；
+- Masked CoT 使用 `prompt`、`trace` 和 `answer`，但 trace 部分 loss mask；
+- Soft Token 使用 `prompt` 和 `answer`，K 个 soft steps 由 training forward pass 插入；
+- Latent Thought 使用 `prompt` 和 `answer`，K 个 latent steps 由 training forward pass 插入。
 
 ## 训练与测试
 
@@ -556,7 +802,7 @@ Interpretability：
 
 - 使用 Qwen3-0.6B-Base。
 - 固定 K：0, 4, 8, 16, 32。
-- 使用 graph、maze、arithmetic 任务。
+- 使用 graph reachability、shortest path、maze planning、symbolic arithmetic 任务。
 - 比较 accuracy-compute curves。
 
 ### Phase 2: Scale Check
@@ -578,13 +824,7 @@ Interpretability：
 - 如果 final-answer-only 训练不稳定，再尝试辅助 latent loss。
 - 探索从 textual CoT 到 soft token，再到 latent thought 的 curriculum。
 
-### Phase 5: RL
-
-- 只有在 SFT 出现正向信号后再加入 RL。
-- 使用可验证 reward。
-- 比较 Direct Answer、Standard CoT、Soft Token、Latent Thought 在 RL 下的收益差异。
-
-### Phase 6: Real Tasks
+### Phase 5: Real Tasks
 
 - GSM8K / SVAMP：数学；
 - ProofWriter / PrOntoQA：逻辑；

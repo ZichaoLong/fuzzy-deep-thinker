@@ -47,16 +47,9 @@ Only the answer tokens need to be decoded into the discrete vocabulary for human
 
 ## Experimental Scope
 
-The first phase should use supervised fine-tuning, not reinforcement learning.
+This plan uses supervised fine-tuning and supervised auxiliary losses only.
 
-RL is deferred because it introduces additional variables:
-
-- reward design;
-- exploration instability;
-- policy collapse or shortcut learning;
-- ambiguity about whether gains come from the continuous thinking mechanism or the RL objective.
-
-The clean first-stage question is:
+The clean experimental question is:
 
 > Under the same base model, same data, same answer format, and comparable compute budget, does continuous thinking outperform discrete chain-of-thought?
 
@@ -282,17 +275,202 @@ However, adaptive K should not be mixed into the first experiment because it con
 
 ## Data
 
-Phase 1 should use synthetic, automatically verifiable tasks.
+The first experiments should use synthetic, automatically verifiable tasks.
 
-Recommended tasks:
+The recommended order is:
 
-- graph reachability;
-- shortest path;
-- maze planning;
-- Game of 24;
-- symbolic arithmetic;
-- bAbI-style multi-hop QA;
-- simple logic problems.
+```text
+start with: graph reachability, shortest path, maze planning, symbolic arithmetic
+then add:   Game of 24, bAbI-style multi-hop QA, simple logic problems
+```
+
+The first group is preferred because each task has a small deterministic solver, a clean final-answer verifier, and a controllable difficulty axis.
+
+### Task 1: Graph Reachability
+
+Prompt:
+
+```text
+You are given a directed graph.
+Nodes: A, B, C, D, E
+Edges: A->B, B->D, C->E
+Question: Is there a path from A to D?
+Return YES or NO.
+```
+
+Answer:
+
+```text
+YES
+```
+
+Solver:
+
+```text
+BFS or DFS from source to target
+```
+
+Oracle trace for Standard CoT:
+
+```text
+Start at A. Visit B from A. Visit D from B. D is reached.
+```
+
+Difficulty controls:
+
+- number of nodes;
+- edge density;
+- shortest path length;
+- number of distractor edges;
+- reachable vs unreachable label balance.
+
+This is the cleanest first task because final answers are binary and the reasoning depth can be controlled by path length.
+
+### Task 2: Shortest Path
+
+Prompt:
+
+```text
+You are given an unweighted directed graph.
+Nodes: A, B, C, D, E
+Edges: A->B, A->C, B->D, C->D, D->E
+Question: What is the shortest path distance from A to E?
+Return an integer, or INF if unreachable.
+```
+
+Answer:
+
+```text
+3
+```
+
+Solver:
+
+```text
+BFS for unweighted graphs
+```
+
+Oracle trace:
+
+```text
+Distance(A)=0. From A set B=1 and C=1. From B set D=2. From D set E=3. The shortest distance is 3.
+```
+
+Difficulty controls:
+
+- number of nodes;
+- shortest path distance;
+- branching factor;
+- unreachable cases;
+- distractor paths that are longer than the shortest path.
+
+Start with unweighted graphs. Weighted graphs require Dijkstra and add arithmetic noise, so they should be introduced later.
+
+### Task 3: Maze Planning
+
+Prompt:
+
+```text
+Find the shortest path from S to G in the grid.
+S..#
+.#..
+..#G
+Return the shortest path length, or INF if no path exists.
+```
+
+Answer:
+
+```text
+5
+```
+
+Solver:
+
+```text
+BFS over grid cells
+```
+
+Oracle trace:
+
+```text
+Expand S at distance 0. Add reachable neighbors at distance 1. Continue BFS until G is reached at distance 5.
+```
+
+Difficulty controls:
+
+- grid size;
+- wall density;
+- shortest path length;
+- number of dead ends;
+- solvable vs unsolvable label balance.
+
+Maze planning is a spatial version of graph search. It tests whether latent thinking helps when the model must maintain an implicit state over a structured input.
+
+### Task 4: Symbolic Arithmetic
+
+Prompt:
+
+```text
+Evaluate the expression:
+((3 + 5) - 2) + 4
+Return the integer result.
+```
+
+Answer:
+
+```text
+10
+```
+
+Solver:
+
+```text
+parse expression into an AST, then evaluate it deterministically
+```
+
+Oracle trace:
+
+```text
+3 + 5 = 8. 8 - 2 = 6. 6 + 4 = 10.
+```
+
+Difficulty controls:
+
+- expression depth;
+- number range;
+- operators;
+- parentheses depth;
+- intermediate value range.
+
+Start with `+`, `-`, and small positive integers. Add multiplication only after the baseline setup is stable.
+
+### Later Tasks
+
+Game of 24:
+
+- Input four numbers.
+- Output an expression that evaluates to 24, or `NO SOLUTION`.
+- Generate answers with exhaustive search.
+- Verify by parsing and evaluating the returned expression.
+- This is harder because there may be many valid answers.
+
+bAbI-style multi-hop QA:
+
+- Generate short synthetic stories with facts and state updates.
+- Ask a question that requires retrieving two or more facts.
+- Solve with a symbolic state tracker.
+- Useful for testing language-heavy multi-hop reasoning.
+
+Simple logic:
+
+- Generate facts and Horn-style rules.
+- Ask whether a query is entailed.
+- Solve with forward chaining.
+- Control difficulty by proof depth and number of distractor rules.
+
+These tasks should be added after the first four tasks produce reliable training and evaluation curves.
+
+## Data Generation
 
 Each example should contain:
 
@@ -309,7 +487,68 @@ Each example should contain:
 }
 ```
 
-Use deterministic solvers to generate traces when possible. Avoid using LLM-generated traces in Phase 1 because they add teacher noise.
+Use deterministic solvers to generate traces. Avoid using LLM-generated traces in the first experiments because they add teacher noise.
+
+The generation pipeline should be:
+
+```text
+1. Sample task parameters from a difficulty config.
+2. Generate a problem instance with a random seed.
+3. Run a deterministic solver.
+4. Save the prompt, canonical trace, final answer, metadata, and seed.
+5. Verify that the final answer parser accepts the saved answer.
+```
+
+Suggested initial dataset sizes per task:
+
+```text
+debug train:   2k examples
+debug dev:     200 examples
+main train:    50k examples
+main dev:      2k examples
+ID test:       2k examples
+OOD test:      2k examples
+```
+
+Use disjoint random seeds for train, dev, ID test, and OOD test. Do not create the test set by randomly splitting near-duplicate generated examples after the fact.
+
+Suggested initial difficulty config:
+
+| Task | Train / ID test | OOD test |
+|---|---|---|
+| Graph reachability | 6-10 nodes, path length 1-4, 50/50 reachable labels | 12-18 nodes, path length 5-8, more distractor edges |
+| Shortest path | 6-10 nodes, distance 2-5, unweighted graphs | 12-18 nodes, distance 6-10, more distractor paths |
+| Maze planning | 5x5 to 8x8 grids, path length 4-12, wall density 0.15-0.30 | 10x10 to 14x14 grids, path length 14-28, wall density 0.20-0.35 |
+| Symbolic arithmetic | expression depth 2-4, integers 0-20, `+` and `-` | expression depth 5-8, integers 0-50, more parentheses |
+
+Suggested seed protocol:
+
+```text
+train seeds: 0 to 49,999
+dev seeds: 1,000,000 to 1,001,999
+ID test seeds: 2,000,000 to 2,001,999
+OOD test seeds: 3,000,000 to 3,001,999
+```
+
+The ID test uses the same difficulty config as training but disjoint seeds. The OOD test uses larger or deeper instances.
+
+The final answer format should be canonical and minimal:
+
+```text
+Answer: YES
+Answer: NO
+Answer: 3
+Answer: INF
+Answer: (3+5)*(6-3)
+```
+
+For the five model variants:
+
+- Direct Answer uses `prompt` and `answer`.
+- Standard CoT uses `prompt`, `trace`, and `answer`.
+- Masked CoT uses `prompt`, `trace`, and `answer`, but masks trace loss.
+- Soft Token uses `prompt` and `answer`; the K soft steps are inserted by the training forward pass.
+- Latent Thought uses `prompt` and `answer`; the K latent steps are inserted by the training forward pass.
 
 ## Train/Test Split
 
@@ -493,7 +732,7 @@ Interpretability:
 
 - Use Qwen3-0.6B-Base.
 - Run fixed K values: 0, 4, 8, 16, 32.
-- Use graph, maze, and arithmetic tasks.
+- Use graph reachability, shortest path, maze planning, and symbolic arithmetic tasks.
 - Compare accuracy-compute curves.
 
 ### Phase 2: Scale Check
@@ -515,13 +754,7 @@ Interpretability:
 - Test auxiliary latent losses only if final-answer-only training is unstable.
 - Explore curriculum from textual CoT to soft token to latent thought.
 
-### Phase 5: RL
-
-- Add reinforcement learning only after SFT shows a clear signal.
-- Use verifiable rewards.
-- Compare RL gains across Direct Answer, Standard CoT, Soft Token, and Latent Thought.
-
-### Phase 6: Real Tasks
+### Phase 5: Real Tasks
 
 - GSM8K / SVAMP for math.
 - ProofWriter / PrOntoQA for logic.
