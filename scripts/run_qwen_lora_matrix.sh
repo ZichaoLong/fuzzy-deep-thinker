@@ -17,6 +17,7 @@ STEPS="${STEPS:-80}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-16}"
 DIAGNOSTIC_METADATA_KEYS="${DIAGNOSTIC_METADATA_KEYS:-}"
+DIAGNOSTIC_CASE_EXAMPLES="${DIAGNOSTIC_CASE_EXAMPLES:-0}"
 LR="${LR:-0.0001}"
 LORA_R="${LORA_R:-8}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
@@ -76,6 +77,7 @@ for seed in ${SEEDS}; do
       --gradient-accumulation-steps "${GRAD_ACCUM_STEPS}" \
       --eval-examples "${EVAL_EXAMPLES}" \
       --diagnostic-metadata-keys "${DIAGNOSTIC_METADATA_KEYS}" \
+      --diagnostic-case-examples "${DIAGNOSTIC_CASE_EXAMPLES}" \
       --eval-mode binary_choice \
       --lr "${LR}" \
       --seed "${seed}" \

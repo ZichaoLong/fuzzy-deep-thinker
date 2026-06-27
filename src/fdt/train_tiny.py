@@ -21,7 +21,11 @@ def main() -> None:
     parser.add_argument("--method", choices=["direct", "cot", "masked_cot", "soft", "latent"], default="direct")
     parser.add_argument("--data-dir", type=Path, default=Path("data/phase1a_smoke"))
     parser.add_argument("--build-data", action="store_true")
-    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder", "simple"], default="standard")
+    parser.add_argument(
+        "--difficulty",
+        choices=["standard", "easy", "easy_ladder", "hard_ladder", "simple"],
+        default="standard",
+    )
     parser.add_argument("--device", default="cpu", help="cpu or npu:0")
     parser.add_argument("--eval-mode", choices=["generate", "binary_choice"], default="generate")
     parser.add_argument("--steps", type=int, default=80)

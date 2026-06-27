@@ -47,6 +47,30 @@ def test_easy_graph_reachability_is_small_and_binary():
     assert ood.answer in {"YES", "NO"}
 
 
+def test_hard_ladder_graph_reachability_controls_size_path_and_labels():
+    train_examples = [
+        generate_example("graph_reachability", seed=i, split="train", difficulty="hard_ladder") for i in range(60)
+    ]
+    ood_examples = [
+        generate_example("graph_reachability", seed=i, split="ood_test", difficulty="hard_ladder") for i in range(100)
+    ]
+
+    assert {example.metadata["num_nodes"] for example in train_examples} == {6, 7, 8, 9, 10}
+    assert {example.metadata["num_nodes"] for example in ood_examples} == {12, 13, 14, 15, 16}
+    assert {example.answer for example in train_examples} == {"YES", "NO"}
+    assert {example.answer for example in ood_examples} == {"YES", "NO"}
+    assert all(example.metadata["difficulty"] == "hard_ladder" for example in train_examples + ood_examples)
+
+    train_yes_paths = {
+        example.metadata["path_length"] for example in train_examples if example.answer == "YES"
+    }
+    ood_yes_paths = {
+        example.metadata["path_length"] for example in ood_examples if example.answer == "YES"
+    }
+    assert train_yes_paths == {1, 2, 3}
+    assert ood_yes_paths == {4, 5, 6, 7, 8}
+
+
 def test_pointer_chasing_depth_ladder_and_balanced_labels():
     train_examples = [generate_example("pointer_chasing", seed=i, split="train") for i in range(12)]
     ood_examples = [generate_example("pointer_chasing", seed=i, split="ood_test") for i in range(16)]

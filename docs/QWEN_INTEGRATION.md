@@ -165,6 +165,25 @@ ood_test_num_nodes_8_mean
 ood_test_path_length_1_mean
 ```
 
+当前 diagnostics 由 dev/id/ood 的同一次评估 records 聚合，不会再对每个 metadata 子组重复调用模型。默认 JSON 只写 split 级统计、samples 和成功/失败案例；diagnostics 分组默认不写完整案例，可通过 `DIAGNOSTIC_CASE_EXAMPLES=1` 打开。若需要完整逐样本 records，可在 `train_qwen` 命令中显式加入 `--include-eval-records`。
+
+如果 `easy_ladder` 已接近满分，优先切换到更难的图可达设置：
+
+```bash
+DIFFICULTY=hard_ladder \
+DATA_DIR=data/qwen_hard_probe \
+OUTPUT_DIR=outputs/qwen_lora_hard_probe_npu \
+CHECKPOINT_DIR=outputs/qwen_lora_hard_probe_npu/checkpoints \
+CONFIGS="direct:- cot:- latent:1" \
+SEEDS="0 1" \
+STEPS=80 \
+EVAL_EXAMPLES=200 \
+DIAGNOSTIC_METADATA_KEYS=answer,num_nodes,path_length \
+scripts/with_conda_npu.sh scripts/run_qwen_lora_matrix.sh
+```
+
+`hard_ladder` 的训练 split 使用 6-10 个节点、YES 样本最短路径长度 1-3；OOD split 使用 12-16 个节点、YES 样本最短路径长度 4-8。它用于检验方法在更长隐式搜索链和更大图上的泛化，而不是只验证基础问答格式是否可学。
+
 checkpoint 支持：
 
 ```bash

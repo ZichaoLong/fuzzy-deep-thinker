@@ -18,6 +18,13 @@ def test_build_split_accepts_easy_difficulty(tmp_path):
     assert all(example.metadata["difficulty"] == "easy" for example in examples)
 
 
+def test_build_split_accepts_hard_ladder_difficulty(tmp_path):
+    path = build_split(tmp_path, "graph_reachability", "train", 6, seed_start=0, difficulty="hard_ladder")
+    examples = read_jsonl(path)
+    assert len(examples) == 6
+    assert all(example.metadata["difficulty"] == "hard_ladder" for example in examples)
+
+
 def test_easy_ladder_uses_size_curriculum_and_balanced_labels(tmp_path):
     train_path = build_split(tmp_path, "graph_reachability", "train", 12, seed_start=0, difficulty="easy_ladder")
     ood_path = build_split(tmp_path, "graph_reachability", "ood_test", 8, seed_start=0, difficulty="easy_ladder")

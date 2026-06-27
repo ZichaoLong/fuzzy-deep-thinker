@@ -23,7 +23,11 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=Path("data/qwen_smoke"))
     parser.add_argument("--build-data", action="store_true")
     parser.add_argument("--data-preset", choices=["smoke", "debug"], default="smoke")
-    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder", "simple"], default="easy_ladder")
+    parser.add_argument(
+        "--difficulty",
+        choices=["standard", "easy", "easy_ladder", "hard_ladder", "simple"],
+        default="easy_ladder",
+    )
     parser.add_argument("--device", default="cpu", help="cpu or npu:0")
     parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
     parser.add_argument("--eval-mode", choices=["generate", "binary_choice"], default="binary_choice")
@@ -34,6 +38,12 @@ def main() -> None:
         default="",
         help="Comma-separated metadata keys to group dev/id/ood evaluation by. Use answer for labels.",
     )
+    parser.add_argument(
+        "--diagnostic-case-examples",
+        type=int,
+        default=0,
+        help="Success/failure cases to keep per diagnostic group. Split-level cases still use --case-examples.",
+    )
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -41,6 +51,11 @@ def main() -> None:
     parser.add_argument("--soft-temperature", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--case-examples", type=int, default=2)
+    parser.add_argument(
+        "--include-eval-records",
+        action="store_true",
+        help="Write full per-example eval records to JSON. Diagnostics always use records internally.",
+    )
     parser.add_argument("--use-lora", action="store_true")
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=16)
@@ -137,6 +152,24 @@ def main() -> None:
         "id_test": id_examples[: args.eval_examples],
         "ood_test": ood_examples[: args.eval_examples],
     }
+    eval_results = {
+        split_name: evaluate(
+            model,
+            tokenizer,
+            examples,
+            args.method,
+            args.k,
+            args.device,
+            args.max_new_tokens,
+            args.eval_mode,
+            args.case_examples,
+        )
+        for split_name, examples in eval_splits.items()
+    }
+    output_eval_results = {
+        split_name: metric_for_output(metric, include_records=args.include_eval_records)
+        for split_name, metric in eval_results.items()
+    }
     metrics = {
         "model_name_or_path": args.model_name_or_path,
         "task": args.task,
@@ -159,41 +192,9 @@ def main() -> None:
         "checkpoint_loaded": str(args.load_checkpoint) if args.load_checkpoint is not None else None,
         "checkpoint_load_info": load_info,
         "checkpoint_saved": str(args.save_checkpoint) if args.save_checkpoint is not None else None,
-        "dev": evaluate(
-            model,
-            tokenizer,
-            eval_splits["dev"],
-            args.method,
-            args.k,
-            args.device,
-            args.max_new_tokens,
-            args.eval_mode,
-            args.case_examples,
-        ),
-        "id_test": evaluate(
-            model,
-            tokenizer,
-            eval_splits["id_test"],
-            args.method,
-            args.k,
-            args.device,
-            args.max_new_tokens,
-            args.eval_mode,
-            args.case_examples,
-        ),
-        "ood_test": evaluate(
-            model,
-            tokenizer,
-            eval_splits["ood_test"],
-            args.method,
-            args.k,
-            args.device,
-            args.max_new_tokens,
-            args.eval_mode,
-            args.case_examples,
-        ),
+        **output_eval_results,
     }
-    diagnostics = run_diagnostics(model, tokenizer, args, eval_splits)
+    diagnostics = run_diagnostics(args, eval_results)
     if diagnostics:
         metrics["diagnostics"] = diagnostics
     print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
@@ -476,9 +477,7 @@ def evaluate(model, tokenizer, examples, method, k, device, max_new_tokens, eval
 
     import torch
 
-    correct = 0
-    predictions = []
-    cases = {"success": [], "failure": []}
+    records = []
     with torch.no_grad():
         for example in examples:
             if method == "direct":
@@ -500,13 +499,18 @@ def evaluate(model, tokenizer, examples, method, k, device, max_new_tokens, eval
 
             answer = extract_answer(generated)
             ok = verify_answer(example, answer)
-            correct += int(ok)
-            sample = {"expected": example.answer, "generated": generated[:160], "parsed": answer, "ok": ok}
-            if len(predictions) < 5:
-                predictions.append(sample)
-            record_case(cases, {**sample, "prompt": example.prompt[:500], "metadata": example.metadata}, ok, case_examples)
+            records.append(
+                {
+                    "expected": example.answer,
+                    "generated": generated[:160],
+                    "parsed": answer,
+                    "ok": ok,
+                    "prompt": example.prompt[:500],
+                    "metadata": example.metadata,
+                }
+            )
     model.train()
-    return {"accuracy": correct / max(1, len(examples)), "num_examples": len(examples), "samples": predictions, "cases": cases}
+    return records_to_metric(records, case_examples, include_records=True)
 
 
 def evaluate_binary_choice(model, tokenizer, examples, method, k, device, max_trace_tokens, case_examples):
@@ -514,9 +518,7 @@ def evaluate_binary_choice(model, tokenizer, examples, method, k, device, max_tr
 
     choices = ["YES", "NO"]
     candidate_ids = {choice: encode(tokenizer, f"{choice}\n", device) for choice in choices}
-    correct = 0
-    predictions = []
-    cases = {"success": [], "failure": []}
+    records = []
     with torch.no_grad():
         for example in examples:
             generated_trace = None
@@ -545,46 +547,74 @@ def evaluate_binary_choice(model, tokenizer, examples, method, k, device, max_tr
 
             answer = min(scores, key=scores.get)
             ok = verify_answer(example, answer)
-            correct += int(ok)
-            sample = {"expected": example.answer, "parsed": answer, "scores": scores, "ok": ok}
+            record = {
+                "expected": example.answer,
+                "parsed": answer,
+                "scores": scores,
+                "ok": ok,
+                "prompt": example.prompt[:500],
+                "metadata": example.metadata,
+            }
             if generated_trace is not None:
-                sample["generated_trace"] = generated_trace[:160]
-            if len(predictions) < 5:
-                predictions.append(sample)
-            record_case(cases, {**sample, "prompt": example.prompt[:500], "metadata": example.metadata}, ok, case_examples)
-    return {"accuracy": correct / max(1, len(examples)), "num_examples": len(examples), "samples": predictions, "cases": cases}
+                record["generated_trace"] = generated_trace[:160]
+            records.append(record)
+    return records_to_metric(records, case_examples, include_records=True)
 
 
-def run_diagnostics(model, tokenizer, args: argparse.Namespace, eval_splits: dict[str, list[Example]]) -> dict:
+def records_to_metric(records: list[dict], case_examples: int, include_records: bool = False) -> dict:
+    correct = sum(1 for record in records if record.get("ok"))
+    samples = [sample_from_record(record) for record in records[:5]]
+    cases = {"success": [], "failure": []}
+    for record in records:
+        record_case(cases, record, bool(record.get("ok")), case_examples)
+    metric = {
+        "accuracy": correct / max(1, len(records)),
+        "num_examples": len(records),
+        "samples": samples,
+        "cases": cases,
+    }
+    if include_records:
+        metric["records"] = records
+    return metric
+
+
+def metric_for_output(metric: dict, include_records: bool) -> dict:
+    if include_records:
+        return metric
+    return {key: value for key, value in metric.items() if key != "records"}
+
+
+def sample_from_record(record: dict) -> dict:
+    keys = ["expected", "generated", "parsed", "scores", "generated_trace", "ok"]
+    return {key: record[key] for key in keys if key in record}
+
+
+def run_diagnostics(args: argparse.Namespace, eval_results: dict[str, dict]) -> dict:
     diagnostics = {}
     if not args.diagnostic_metadata_keys:
         return diagnostics
 
     keys = [key.strip() for key in args.diagnostic_metadata_keys.split(",") if key.strip()]
-    for split_name, examples in eval_splits.items():
+    for split_name, metric in eval_results.items():
+        records = metric.get("records", [])
         for key in keys:
-            groups: dict[str, list[Example]] = defaultdict(list)
-            for example in examples:
-                groups[diagnostic_value(example, key)].append(example)
-            for value, group in sorted(groups.items()):
-                diagnostics[f"{split_name}_{slug(key)}_{slug(value)}"] = evaluate(
-                    model,
-                    tokenizer,
-                    group,
-                    args.method,
-                    args.k,
-                    args.device,
-                    args.max_new_tokens,
-                    args.eval_mode,
-                    args.case_examples,
+            groups: dict[str, list[dict]] = defaultdict(list)
+            for record in records:
+                groups[diagnostic_record_value(record, key)].append(record)
+            for value, group_records in sorted(groups.items()):
+                diagnostics[f"{split_name}_{slug(key)}_{slug(value)}"] = records_to_metric(
+                    group_records,
+                    getattr(args, "diagnostic_case_examples", 0),
+                    include_records=False,
                 )
     return diagnostics
 
 
-def diagnostic_value(example: Example, key: str) -> str:
+def diagnostic_record_value(record: dict, key: str) -> str:
     if key == "answer":
-        return example.answer
-    value = example.metadata.get(key, "missing")
+        return str(record.get("expected", "missing"))
+    metadata = record.get("metadata") or {}
+    value = metadata.get(key, "missing")
     if value is None:
         return "none"
     return str(value)

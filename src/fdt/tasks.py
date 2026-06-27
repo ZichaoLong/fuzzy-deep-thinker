@@ -43,6 +43,8 @@ def generate_example(task: TaskName, seed: int, split: str = "train", difficulty
             return _generate_easy_graph_reachability(rng, seed, split, ood)
         if difficulty == "easy_ladder":
             return _generate_easy_ladder_graph_reachability(rng, seed, split, ood)
+        if difficulty == "hard_ladder":
+            return _generate_hard_ladder_graph_reachability(rng, seed, split, ood)
         return _generate_graph_reachability(rng, seed, split, ood)
     if task == "pointer_chasing":
         return _generate_pointer_chasing(rng, seed, split, ood, simple=difficulty == "simple")
@@ -58,7 +60,7 @@ def generate_example(task: TaskName, seed: int, split: str = "train", difficulty
 def _validate_difficulty(task: TaskName, difficulty: str) -> None:
     if difficulty == "standard":
         return
-    if task == "graph_reachability" and difficulty in {"easy", "easy_ladder"}:
+    if task == "graph_reachability" and difficulty in {"easy", "easy_ladder", "hard_ladder"}:
         return
     if task == "pointer_chasing" and difficulty == "simple":
         return
@@ -225,6 +227,102 @@ def _generate_easy_ladder_graph_reachability(rng: random.Random, seed: int, spli
         distractor_edges=2,
         reachable=reachable,
         difficulty="easy_ladder",
+    )
+
+
+def _generate_hard_ladder_graph_reachability(rng: random.Random, seed: int, split: str, ood: bool) -> Example:
+    node_choices = [12, 13, 14, 15, 16] if ood else [6, 7, 8, 9, 10]
+    path_choices = [4, 5, 6, 7, 8] if ood else [1, 2, 3]
+    n = node_choices[seed % len(node_choices)]
+    target_path_length = path_choices[(seed // len(node_choices)) % len(path_choices)]
+    reachable = (seed // (len(node_choices) * len(path_choices))) % 2 == 0
+    return _generate_hard_ladder_graph_reachability_fixed_n(
+        rng,
+        seed,
+        split,
+        n,
+        target_path_length=target_path_length,
+        reachable=reachable,
+    )
+
+
+def _generate_hard_ladder_graph_reachability_fixed_n(
+    rng: random.Random,
+    seed: int,
+    split: str,
+    n: int,
+    target_path_length: int,
+    reachable: bool,
+) -> Example:
+    source, target = 0, n - 1
+    if target_path_length < 1 or target_path_length > n - 1:
+        raise ValueError(f"target_path_length={target_path_length} is invalid for n={n}")
+
+    edges: set[tuple[int, int]] = set()
+    if reachable:
+        middle_count = target_path_length - 1
+        middle = rng.sample(range(1, n - 1), middle_count)
+        path = [source, *middle, target]
+        edges.update(zip(path, path[1:]))
+
+        target_edges = min(n * 3, n * (n - 1))
+        attempts = n * 20
+        for _ in range(attempts):
+            if len(edges) >= target_edges:
+                break
+            candidate = (rng.randrange(n), rng.randrange(n))
+            if candidate[0] == candidate[1] or candidate in edges:
+                continue
+            candidate_edges = {*edges, candidate}
+            distance, _ = _bfs_distance(n, candidate_edges, source, target)
+            if distance == target_path_length:
+                edges.add(candidate)
+    else:
+        reachable_side_size = rng.randint(max(2, n // 3), max(2, n - 3))
+        reachable_nodes = set(rng.sample(range(1, n - 1), reachable_side_size - 1))
+        reachable_side = {source, *reachable_nodes}
+        blocked_side = set(range(n)) - reachable_side
+
+        target_edges = min(n * 3, len(reachable_side) * (len(reachable_side) - 1) + len(blocked_side) * (n - 1))
+        attempts = n * 20
+        for _ in range(attempts):
+            if len(edges) >= target_edges:
+                break
+            if rng.random() < 0.45 and len(reachable_side) >= 2:
+                a, b = rng.sample(sorted(reachable_side), 2)
+            elif rng.random() < 0.85 and len(blocked_side) >= 2:
+                a, b = rng.sample(sorted(blocked_side), 2)
+            else:
+                a = rng.choice(sorted(blocked_side))
+                b = rng.choice(sorted(reachable_side))
+            if a != b:
+                edges.add((a, b))
+
+    solved_path, visit_order = _bfs_path(n, edges, source, target)
+    answer = "YES" if solved_path else "NO"
+    trace = _graph_trace(source, target, solved_path, visit_order)
+    prompt = (
+        "You are given a directed graph.\n"
+        f"Nodes: {_format_nodes(n)}\n"
+        f"Edges: {_format_edges(edges)}\n"
+        f"Question: Is there a path from {_node_name(source)} to {_node_name(target)}?\n"
+        "Return YES or NO."
+    )
+    return Example(
+        prompt=prompt,
+        trace=trace,
+        answer=answer,
+        metadata={
+            "task": "graph_reachability",
+            "difficulty": "hard_ladder",
+            "split": split,
+            "seed": seed,
+            "num_nodes": n,
+            "num_edges": len(edges),
+            "reachable": answer == "YES",
+            "path_length": None if solved_path is None else len(solved_path) - 1,
+            "target_path_length": target_path_length,
+        },
     )
 
 
@@ -675,7 +773,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate FDT synthetic task data as JSONL.")
     parser.add_argument("--task", choices=[*list_tasks(), "all"], default="all")
     parser.add_argument("--split", choices=["train", "dev", "id_test", "ood_test"], default="train")
-    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder", "simple"], default="standard")
+    parser.add_argument(
+        "--difficulty",
+        choices=["standard", "easy", "easy_ladder", "hard_ladder", "simple"],
+        default="standard",
+    )
     parser.add_argument("--num-examples", type=int, default=100)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--out-dir", type=Path, default=Path("data/debug"))
