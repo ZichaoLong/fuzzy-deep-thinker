@@ -1,8 +1,8 @@
-# Continuous Latent Thought
+# Fuzzy Deep Thinker
 
 Chinese version: [README.zh-CN.md](README.zh-CN.md)
 
-Continuous Latent Thought, abbreviated as CLT, is a research project about replacing human-readable chain-of-thought tokens with continuous internal computation steps.
+Fuzzy Deep Thinker, abbreviated as FDT, is a research project about replacing human-readable chain-of-thought tokens with continuous internal computation steps.
 
 The central hypothesis is:
 
@@ -201,7 +201,7 @@ answer CE
 
 Purpose:
 
-- main CLT experiment;
+- main FDT experiment;
 - tests whether hidden-state-space thinking is a better intermediate computation carrier.
 
 This is closest to the core research hypothesis.
@@ -781,7 +781,7 @@ The strongest result would be:
 Primary name:
 
 ```text
-Continuous Latent Thought (CLT)
+Fuzzy Deep Thinker (FDT)
 ```
 
 Other possible names:
@@ -792,4 +792,4 @@ Other possible names:
 - Soft Internal Reasoning (SIR)
 - Latent Deliberation (LD)
 
-The recommended name is Continuous Latent Thought because it directly states the mechanism and avoids overclaiming that the latent states are faithful reasoning traces.
+The recommended name is Fuzzy Deep Thinker because it directly states the mechanism and avoids overclaiming that the latent states are faithful reasoning traces.

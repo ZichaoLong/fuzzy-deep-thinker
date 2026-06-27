@@ -17,6 +17,8 @@ LR="${LR:-0.0003}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-96}"
 DIAGNOSTIC_NODES="${DIAGNOSTIC_NODES:-}"
 DIAGNOSTIC_EXAMPLES="${DIAGNOSTIC_EXAMPLES:-0}"
+DIAGNOSTIC_METADATA_KEYS="${DIAGNOSTIC_METADATA_KEYS:-}"
+CASE_EXAMPLES="${CASE_EXAMPLES:-2}"
 PYTHON="${PYTHON:-python3}"
 
 CONFIGS="${CONFIGS:-direct:- cot:- soft:0 soft:8 soft:16 latent:0 latent:8 latent:16}"
@@ -60,6 +62,8 @@ for seed in ${SEEDS}; do
       --max-new-tokens "${MAX_NEW_TOKENS}" \
       --easy-graph-diagnostic-nodes "${DIAGNOSTIC_NODES}" \
       --diagnostic-examples "${DIAGNOSTIC_EXAMPLES}" \
+      --diagnostic-metadata-keys "${DIAGNOSTIC_METADATA_KEYS}" \
+      --case-examples "${CASE_EXAMPLES}" \
       --save-checkpoint "${checkpoint_path}" \
       "${extra_k_args[@]}" \
       --output "${output_path}" \
@@ -118,25 +122,44 @@ groups = defaultdict(list)
 for row in rows:
     groups[(row["config"], row["method"], row["k"], row["steps"])].append(row)
 
+base_fields = {
+    "config",
+    "method",
+    "k",
+    "seed",
+    "steps",
+    "dev",
+    "id_test",
+    "ood_test",
+    "loss",
+    "elapsed_sec",
+    "checkpoint",
+}
+diagnostic_keys = sorted({key for row in rows for key in row.keys()} - base_fields)
+
 aggregate = []
 for (config, method, k, steps), group in groups.items():
-    aggregate.append(
-        {
-            "config": config,
-            "method": method,
-            "k": k,
-            "steps": steps,
-            "n": len(group),
-            "dev_mean": mean([row["dev"] for row in group]),
-            "dev_std": std([row["dev"] for row in group]),
-            "id_test_mean": mean([row["id_test"] for row in group]),
-            "id_test_std": std([row["id_test"] for row in group]),
-            "ood_test_mean": mean([row["ood_test"] for row in group]),
-            "ood_test_std": std([row["ood_test"] for row in group]),
-            "loss_mean": mean([row["loss"] for row in group if row["loss"] is not None]),
-            "elapsed_sec_mean": mean([row["elapsed_sec"] for row in group]),
-        }
-    )
+    item = {
+        "config": config,
+        "method": method,
+        "k": k,
+        "steps": steps,
+        "n": len(group),
+        "dev_mean": mean([row["dev"] for row in group]),
+        "dev_std": std([row["dev"] for row in group]),
+        "id_test_mean": mean([row["id_test"] for row in group]),
+        "id_test_std": std([row["id_test"] for row in group]),
+        "ood_test_mean": mean([row["ood_test"] for row in group]),
+        "ood_test_std": std([row["ood_test"] for row in group]),
+        "loss_mean": mean([row["loss"] for row in group if row["loss"] is not None]),
+        "elapsed_sec_mean": mean([row["elapsed_sec"] for row in group]),
+    }
+    for key in diagnostic_keys:
+        values = [row[key] for row in group if key in row]
+        if values:
+            item[f"{key}_mean"] = mean(values)
+            item[f"{key}_std"] = std(values)
+    aggregate.append(item)
 aggregate.sort(key=lambda row: config_order.get(row["config"], 999))
 
 print("\nPhase 1d ladder matrix aggregate")

@@ -45,7 +45,7 @@ def generate_example(task: TaskName, seed: int, split: str = "train", difficulty
             return _generate_easy_ladder_graph_reachability(rng, seed, split, ood)
         return _generate_graph_reachability(rng, seed, split, ood)
     if task == "pointer_chasing":
-        return _generate_pointer_chasing(rng, seed, split, ood)
+        return _generate_pointer_chasing(rng, seed, split, ood, simple=difficulty == "simple")
     if task == "shortest_path":
         return _generate_shortest_path(rng, seed, split, ood)
     if task == "maze_planning":
@@ -59,6 +59,8 @@ def _validate_difficulty(task: TaskName, difficulty: str) -> None:
     if difficulty == "standard":
         return
     if task == "graph_reachability" and difficulty in {"easy", "easy_ladder"}:
+        return
+    if task == "pointer_chasing" and difficulty == "simple":
         return
     raise ValueError(f"Unsupported difficulty={difficulty!r} for task={task!r}")
 
@@ -320,11 +322,15 @@ def _graph_trace(source: int, target: int, path: list[int] | None, visit_order: 
     return f"Start at {_node_name(source)}. Visited nodes: {visited}. {_node_name(target)} is not reached."
 
 
-def _generate_pointer_chasing(rng: random.Random, seed: int, split: str, ood: bool) -> Example:
-    depth_choices = [5, 6, 7, 8] if ood else [2, 3, 4]
+def _generate_pointer_chasing(rng: random.Random, seed: int, split: str, ood: bool, simple: bool = False) -> Example:
+    if simple:
+        depth_choices = [2, 3] if ood else [1]
+        n = 4
+    else:
+        depth_choices = [5, 6, 7, 8] if ood else [2, 3, 4]
+        n = 12
     depth = depth_choices[seed % len(depth_choices)]
     answer_is_yes = (seed // len(depth_choices)) % 2 == 0
-    n = 12
 
     start = rng.randrange(n)
     path = [start]
@@ -358,21 +364,33 @@ def _generate_pointer_chasing(rng: random.Random, seed: int, split: str, ood: bo
         f"Start at {_node_name(start)}. {trace_steps}. "
         f"After {depth} steps the state is {_node_name(final_state)}, which {relation} target {_node_name(target)}."
     )
-    prompt = (
-        "You are given deterministic state transition rules.\n"
-        f"States: {_format_nodes(n)}\n"
-        f"Rules: {rules}\n"
-        f"Start: {_node_name(start)}\n"
-        f"Steps: {depth}\n"
-        f"Question: after exactly {depth} transitions, are you at {_node_name(target)}?\n"
-        "Return YES or NO."
-    )
+    if simple:
+        prompt = (
+            f"Rules: {rules}\n"
+            f"Start: {_node_name(start)}\n"
+            f"Next: {_node_name(path[1])}\n"
+            f"Steps: {depth}\n"
+            f"Target: {_node_name(target)}\n"
+            f"Compare: {_node_name(path[1])}={_node_name(target)}\n"
+            "Return YES or NO."
+        )
+    else:
+        prompt = (
+            "You are given deterministic state transition rules.\n"
+            f"States: {_format_nodes(n)}\n"
+            f"Rules: {rules}\n"
+            f"Start: {_node_name(start)}\n"
+            f"Steps: {depth}\n"
+            f"Question: after exactly {depth} transitions, are you at {_node_name(target)}?\n"
+            "Return YES or NO."
+        )
     return Example(
         prompt=prompt,
         trace=trace,
         answer=answer,
         metadata={
             "task": "pointer_chasing",
+            "difficulty": "simple" if simple else "standard",
             "split": split,
             "seed": seed,
             "num_states": n,
@@ -654,10 +672,10 @@ def _is_safe_arithmetic_ast(node: ast.AST) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate CLT synthetic task data as JSONL.")
+    parser = argparse.ArgumentParser(description="Generate FDT synthetic task data as JSONL.")
     parser.add_argument("--task", choices=[*list_tasks(), "all"], default="all")
     parser.add_argument("--split", choices=["train", "dev", "id_test", "ood_test"], default="train")
-    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder"], default="standard")
+    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder", "simple"], default="standard")
     parser.add_argument("--num-examples", type=int, default=100)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--out-dir", type=Path, default=Path("data/debug"))

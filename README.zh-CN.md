@@ -1,6 +1,6 @@
-# Continuous Latent Thought 中文研究计划
+# Fuzzy Deep Thinker 中文研究计划
 
-Continuous Latent Thought，简称 CLT，是一个研究项目，目标是把语言模型的 thinking phase 从人类可读的离散链式思考 token，替换或放松为连续的 embedding / hidden-state 计算步骤。
+Fuzzy Deep Thinker，简称 FDT，是一个研究项目，目标是把语言模型的 thinking phase 从人类可读的离散链式思考 token，替换或放松为连续的 embedding / hidden-state 计算步骤。
 
 核心假设是：
 
@@ -30,11 +30,11 @@ Continuous Latent Thought，简称 CLT，是一个研究项目，目标是把语
 传统路径:
 prompt tokens -> textual thinking tokens -> answer tokens
 
-CLT 路径:
+FDT 路径:
 prompt tokens -> K continuous thinking steps -> answer tokens
 ```
 
-在 CLT 路径中，只有最终输出给人的 answer tokens 需要 decode 到离散 vocabulary。内部 thinking steps 可以停留在连续 embedding 或 hidden-state 空间。
+在 FDT 路径中，只有最终输出给人的 answer tokens 需要 decode 到离散 vocabulary。内部 thinking steps 可以停留在连续 embedding 或 hidden-state 空间。
 
 ## 主要假设
 
@@ -202,7 +202,7 @@ answer CE
 
 用途：
 
-- CLT 的主实验；
+- FDT 的主实验；
 - 测试 hidden-state-space thinking 是否比自然语言 thinking 更适合作为中间计算载体。
 
 这是最贴近本项目核心假设的设置。
@@ -859,7 +859,7 @@ Interpretability：
 推荐名称：
 
 ```text
-Continuous Latent Thought (CLT)
+Fuzzy Deep Thinker (FDT)
 ```
 
 备选名称：
@@ -870,4 +870,4 @@ Continuous Latent Thought (CLT)
 - Soft Internal Reasoning (SIR)
 - Latent Deliberation (LD)
 
-推荐使用 Continuous Latent Thought，因为它直接描述机制，同时避免过度宣称 latent states 是忠实的 reasoning traces。
+推荐使用 Fuzzy Deep Thinker，因为它直接描述机制，同时避免过度宣称 latent states 是忠实的 reasoning traces。

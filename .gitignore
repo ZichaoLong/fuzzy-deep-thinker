@@ -7,3 +7,4 @@ data/
 outputs/
 checkpoints/
 fusion_result.json
+kernel_meta/

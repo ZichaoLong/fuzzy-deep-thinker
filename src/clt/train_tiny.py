@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 from dataclasses import asdict
 import json
 import os
@@ -15,12 +16,12 @@ from .tokenizer import CharTokenizer
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a tiny decoder on CLT synthetic tasks.")
+    parser = argparse.ArgumentParser(description="Train a tiny decoder on FDT synthetic tasks.")
     parser.add_argument("--task", default="graph_reachability")
     parser.add_argument("--method", choices=["direct", "cot", "masked_cot", "soft", "latent"], default="direct")
     parser.add_argument("--data-dir", type=Path, default=Path("data/phase1a_smoke"))
     parser.add_argument("--build-data", action="store_true")
-    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder"], default="standard")
+    parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder", "simple"], default="standard")
     parser.add_argument("--device", default="cpu", help="cpu or npu:0")
     parser.add_argument("--eval-mode", choices=["generate", "binary_choice"], default="generate")
     parser.add_argument("--steps", type=int, default=80)
@@ -38,6 +39,12 @@ def main() -> None:
         help="Comma-separated fixed node counts for graph_reachability/easy diagnostic evaluation.",
     )
     parser.add_argument("--diagnostic-examples", type=int, default=0)
+    parser.add_argument(
+        "--diagnostic-metadata-keys",
+        default="",
+        help="Comma-separated metadata keys to group dev/id/ood evaluation by. Use answer for labels.",
+    )
+    parser.add_argument("--case-examples", type=int, default=2, help="Success/failure cases to keep per evaluation.")
     parser.add_argument("--save-checkpoint", type=Path, default=None)
     parser.add_argument("--load-checkpoint", type=Path, default=None)
     parser.add_argument("--eval-only", action="store_true")
@@ -116,6 +123,11 @@ def main() -> None:
             args.save_checkpoint,
         )
 
+    eval_splits = {
+        "dev": dev_examples[: args.eval_examples],
+        "id_test": id_examples[: args.eval_examples],
+        "ood_test": ood_examples[: args.eval_examples],
+    }
     metrics = {
         "task": args.task,
         "method": args.method,
@@ -130,35 +142,38 @@ def main() -> None:
         "dev": evaluate(
             model,
             tokenizer,
-            dev_examples[: args.eval_examples],
+            eval_splits["dev"],
             args.method,
             args.k,
             args.device,
             args.max_new_tokens,
             args.eval_mode,
+            args.case_examples,
         ),
         "id_test": evaluate(
             model,
             tokenizer,
-            id_examples[: args.eval_examples],
+            eval_splits["id_test"],
             args.method,
             args.k,
             args.device,
             args.max_new_tokens,
             args.eval_mode,
+            args.case_examples,
         ),
         "ood_test": evaluate(
             model,
             tokenizer,
-            ood_examples[: args.eval_examples],
+            eval_splits["ood_test"],
             args.method,
             args.k,
             args.device,
             args.max_new_tokens,
             args.eval_mode,
+            args.case_examples,
         ),
     }
-    diagnostics = _run_diagnostics(model, tokenizer, args)
+    diagnostics = _run_diagnostics(model, tokenizer, args, eval_splits)
     if diagnostics:
         metrics["diagnostics"] = diagnostics
     print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
@@ -204,17 +219,19 @@ def evaluate(
     device: str,
     max_new_tokens: int,
     eval_mode: str,
+    case_examples: int = 2,
 ) -> dict:
     import torch
 
     model.eval()
     if eval_mode == "binary_choice" and _is_binary_answer_set(examples):
-        result = evaluate_binary_choice(model, tokenizer, examples, method, k, device, max_new_tokens)
+        result = evaluate_binary_choice(model, tokenizer, examples, method, k, device, max_new_tokens, case_examples)
         model.train()
         return result
 
     correct = 0
     predictions = []
+    cases = {"success": [], "failure": []}
     with torch.no_grad():
         for example in examples:
             if method == "direct":
@@ -237,8 +254,26 @@ def evaluate(
             correct += int(ok)
             if len(predictions) < 5:
                 predictions.append({"expected": example.answer, "generated": generated[:120], "parsed": answer, "ok": ok})
+            _record_case(
+                cases,
+                {
+                    "prompt": example.prompt[:500],
+                    "metadata": example.metadata,
+                    "expected": example.answer,
+                    "parsed": answer,
+                    "generated": generated[:240],
+                    "ok": ok,
+                },
+                ok,
+                case_examples,
+            )
     model.train()
-    return {"accuracy": correct / max(1, len(examples)), "num_examples": len(examples), "samples": predictions}
+    return {
+        "accuracy": correct / max(1, len(examples)),
+        "num_examples": len(examples),
+        "samples": predictions,
+        "cases": cases,
+    }
 
 
 def evaluate_binary_choice(
@@ -249,6 +284,7 @@ def evaluate_binary_choice(
     k: int,
     device: str,
     max_trace_tokens: int,
+    case_examples: int = 2,
 ) -> dict:
     import torch
 
@@ -258,6 +294,7 @@ def evaluate_binary_choice(
     }
     correct = 0
     predictions = []
+    cases = {"success": [], "failure": []}
 
     with torch.no_grad():
         for example in examples:
@@ -299,21 +336,58 @@ def evaluate_binary_choice(
                 if method in {"cot", "masked_cot"}:
                     sample["generated_trace"] = generated_trace[:160]
                 predictions.append(sample)
+            case = {
+                "prompt": example.prompt[:500],
+                "metadata": example.metadata,
+                "expected": example.answer,
+                "parsed": answer,
+                "scores": scores,
+                "ok": ok,
+            }
+            if method in {"cot", "masked_cot"}:
+                case["generated_trace"] = generated_trace[:240]
+            _record_case(cases, case, ok, case_examples)
 
-    return {"accuracy": correct / max(1, len(examples)), "num_examples": len(examples), "samples": predictions}
+    return {
+        "accuracy": correct / max(1, len(examples)),
+        "num_examples": len(examples),
+        "samples": predictions,
+        "cases": cases,
+    }
 
 
 def _is_binary_answer_set(examples: list[Example]) -> bool:
     return all(example.answer in {"YES", "NO"} for example in examples)
 
 
-def _run_diagnostics(model, tokenizer: CharTokenizer, args) -> dict:
+def _run_diagnostics(model, tokenizer: CharTokenizer, args, eval_splits: dict[str, list[Example]]) -> dict:
+    diagnostics = {}
+    if args.diagnostic_metadata_keys:
+        keys = [key.strip() for key in args.diagnostic_metadata_keys.split(",") if key.strip()]
+        for split_name, examples in eval_splits.items():
+            for key in keys:
+                groups: dict[str, list[Example]] = defaultdict(list)
+                for example in examples:
+                    value = _diagnostic_value(example, key)
+                    groups[value].append(example)
+                for value, group in sorted(groups.items()):
+                    diagnostics[f"{split_name}_{_slug(key)}_{_slug(value)}"] = evaluate(
+                        model,
+                        tokenizer,
+                        group,
+                        args.method,
+                        args.k,
+                        args.device,
+                        args.max_new_tokens,
+                        args.eval_mode,
+                        args.case_examples,
+                    )
+
     if not args.easy_graph_diagnostic_nodes or args.diagnostic_examples <= 0:
-        return {}
+        return diagnostics
     if args.task != "graph_reachability" or args.difficulty not in {"easy", "easy_ladder"}:
         raise ValueError("--easy-graph-diagnostic-nodes is only supported for graph_reachability easy variants")
 
-    diagnostics = {}
     for raw_n in args.easy_graph_diagnostic_nodes.split(","):
         raw_n = raw_n.strip()
         if not raw_n:
@@ -332,8 +406,27 @@ def _run_diagnostics(model, tokenizer: CharTokenizer, args) -> dict:
             args.device,
             args.max_new_tokens,
             args.eval_mode,
+            args.case_examples,
         )
     return diagnostics
+
+
+def _diagnostic_value(example: Example, key: str) -> str:
+    if key == "answer":
+        return example.answer
+    return str(example.metadata.get(key, "missing"))
+
+
+def _slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(value)).strip("_")
+
+
+def _record_case(cases: dict, sample: dict, ok: bool, limit: int) -> None:
+    if limit <= 0:
+        return
+    bucket = "success" if ok else "failure"
+    if len(cases[bucket]) < limit:
+        cases[bucket].append(sample)
 
 
 def extract_answer(text: str) -> str:

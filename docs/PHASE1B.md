@@ -100,7 +100,7 @@ Background:
 
 ```bash
 mkdir -p outputs/phase1b_direct_curve_npu
-nohup bash -lc 'cd /home/zlong/llm/continuous-latent-thought && ASCEND_RT_VISIBLE_DEVICES=5 DEVICE=npu:0 OUTPUT_DIR=outputs/phase1b_direct_curve_npu scripts/with_ascend_env.sh scripts/run_phase1b_direct_curve.sh' \
+nohup bash -lc 'cd /home/zlong/llm/fuzzy-deep-thinker && ASCEND_RT_VISIBLE_DEVICES=5 DEVICE=npu:0 OUTPUT_DIR=outputs/phase1b_direct_curve_npu scripts/with_ascend_env.sh scripts/run_phase1b_direct_curve.sh' \
   > outputs/phase1b_direct_curve_npu/background.log 2>&1 &
 echo $! > outputs/phase1b_direct_curve_npu/pid
 ```

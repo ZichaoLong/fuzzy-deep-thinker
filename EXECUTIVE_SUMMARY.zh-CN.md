@@ -1,4 +1,4 @@
-# Continuous Latent Thought
+# Fuzzy Deep Thinker
 
 > slow thinking 仍然保留，但 thinking phase 是否必须用自然语言 token 表达？
 
@@ -8,7 +8,7 @@
 prompt -> textual thinking tokens -> answer
 ```
 
-CLT 路径：
+FDT 路径：
 
 ```text
 prompt -> K continuous thinking steps -> answer
@@ -45,7 +45,7 @@ main:  Qwen3-1.7B-Base
 | Standard CoT | 自然语言 reasoning trace | `prompt -> oracle trace -> answer` | trace CE + answer CE | 主流 CoT baseline |
 | Masked CoT | trace 存在但不算 loss | `prompt -> oracle trace -> answer` | only answer CE, trace masked | 诊断模仿推理文字是否必要 |
 | Soft Token | vocab distribution 加权 embedding | `prompt -> K soft steps -> answer` | only answer CE | 离散 token 的连续松弛 |
-| Latent Thought | hidden state 回灌为下一步输入 | `prompt -> K latent steps -> answer` | only answer CE | CLT 主实验 |
+| Latent Thought | hidden state 回灌为下一步输入 | `prompt -> K latent steps -> answer` | only answer CE | FDT 主实验 |
 
 其中 Soft Token 和 Latent Thought 的 K 个 thinking steps 不来自数据文件，而是在训练 forward pass 中插入。
 
@@ -96,4 +96,4 @@ ID test 与训练同难度但 seed 不同；OOD test 使用更大图、更长路
 - 小模型效果可能弱，需要在 1.7B 规模复验；
 - CoT baseline 必须控制 token budget，否则比较不公平。
 
-总体判断：CLT 是一个成本可控、问题清晰、可自动评估的研究方向。它保留 slow thinking 的价值，但探索比自然语言 token 更高效的内部表示。
+总体判断：FDT 是一个成本可控、问题清晰、可自动评估的研究方向。它保留 slow thinking 的价值，但探索比自然语言 token 更高效的内部表示。

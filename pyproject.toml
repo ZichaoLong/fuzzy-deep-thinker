@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "continuous-latent-thought"
+name = "fuzzy-deep-thinker"
 version = "0.1.0"
-description = "Synthetic task infrastructure for Continuous Latent Thought experiments"
+description = "Synthetic task infrastructure for Fuzzy Deep Thinker experiments"
 requires-python = ">=3.9"
 
 [tool.setuptools.packages.find]

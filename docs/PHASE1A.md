@@ -6,7 +6,7 @@ Phase 1a runs a minimal end-to-end loop:
 synthetic data -> training format -> tiny decoder training -> dev/ID/OOD evaluation
 ```
 
-The goal is not to prove the CLT hypothesis yet. The goal is to verify that the experiment pipeline is executable and that Direct/CoT/Latent variants use the intended loss surfaces.
+The goal is not to prove the FDT hypothesis yet. The goal is to verify that the experiment pipeline is executable and that Direct/CoT/Latent variants use the intended loss surfaces.
 
 ## Build Smoke Splits
 

@@ -57,6 +57,21 @@ def test_pointer_chasing_depth_ladder_and_balanced_labels():
     assert {example.answer for example in ood_examples} == {"YES", "NO"}
 
 
+def test_simple_pointer_chasing_is_shorter_and_shallower():
+    train_examples = [
+        generate_example("pointer_chasing", seed=i, split="train", difficulty="simple") for i in range(8)
+    ]
+    ood_examples = [
+        generate_example("pointer_chasing", seed=i, split="ood_test", difficulty="simple") for i in range(8)
+    ]
+
+    assert {example.metadata["depth"] for example in train_examples} == {1}
+    assert {example.metadata["depth"] for example in ood_examples} == {2, 3}
+    assert {example.metadata["num_states"] for example in train_examples + ood_examples} == {4}
+    assert {example.answer for example in train_examples} == {"YES", "NO"}
+    assert all(example.metadata["difficulty"] == "simple" for example in train_examples + ood_examples)
+
+
 def test_arithmetic_answer_parser_accepts_simple_expressions():
     assert parse_arithmetic_answer("Answer: (3+5)-2") == 6
     assert parse_arithmetic_answer("not arithmetic") is None

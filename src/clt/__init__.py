@@ -1,4 +1,4 @@
-"""Continuous Latent Thought experiment utilities."""
+"""Fuzzy Deep Thinker experiment utilities."""
 
 from .tasks import Example, generate_example, list_tasks, verify_answer
 
