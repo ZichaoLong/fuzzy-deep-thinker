@@ -143,6 +143,28 @@ outputs/qwen_lora_matrix/
   checkpoints/*.pt
 ```
 
+若要判断当前 `easy_ladder` 对 Qwen 是否过于简单，建议先跑 full-eval diagnostics：
+
+```bash
+DATA_DIR=data/qwen_lora_full_eval \
+OUTPUT_DIR=outputs/qwen_lora_full_eval \
+CHECKPOINT_DIR=outputs/qwen_lora_full_eval/checkpoints \
+SEEDS="0 1 2" \
+EVAL_EXAMPLES=200 \
+DIAGNOSTIC_METADATA_KEYS=answer,num_nodes,path_length \
+scripts/with_conda_npu.sh scripts/run_qwen_lora_matrix.sh
+```
+
+这会在 `aggregate.csv` 中额外写出分组准确率，例如：
+
+```text
+ood_test_answer_YES_mean
+ood_test_answer_NO_mean
+ood_test_num_nodes_7_mean
+ood_test_num_nodes_8_mean
+ood_test_path_length_1_mean
+```
+
 checkpoint 支持：
 
 ```bash

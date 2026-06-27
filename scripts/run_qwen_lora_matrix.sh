@@ -16,6 +16,7 @@ SEEDS="${SEEDS:-0 1}"
 STEPS="${STEPS:-80}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-16}"
+DIAGNOSTIC_METADATA_KEYS="${DIAGNOSTIC_METADATA_KEYS:-}"
 LR="${LR:-0.0001}"
 LORA_R="${LORA_R:-8}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
@@ -74,6 +75,7 @@ for seed in ${SEEDS}; do
       --steps "${STEPS}" \
       --gradient-accumulation-steps "${GRAD_ACCUM_STEPS}" \
       --eval-examples "${EVAL_EXAMPLES}" \
+      --diagnostic-metadata-keys "${DIAGNOSTIC_METADATA_KEYS}" \
       --eval-mode binary_choice \
       --lr "${LR}" \
       --seed "${seed}" \
@@ -105,23 +107,24 @@ method_order = {config.split(":", 1)[0]: i for i, config in enumerate(os.environ
 rows = []
 for path in root.glob("*_seed*.json"):
     payload = json.loads(path.read_text())
-    rows.append(
-        {
-            "config": path.stem.rsplit("_seed", 1)[0],
-            "method": payload["method"],
-            "k": "" if payload["k"] is None else payload["k"],
-            "seed": int(path.stem.rsplit("_seed", 1)[1]),
-            "steps": payload["steps"],
-            "grad_accum": payload["gradient_accumulation_steps"],
-            "trainable_parameters": payload["trainable_parameters"],
-            "dev": payload["dev"]["accuracy"],
-            "id_test": payload["id_test"]["accuracy"],
-            "ood_test": payload["ood_test"]["accuracy"],
-            "loss": payload["train_loss_last"],
-            "elapsed_sec": payload["elapsed_sec"],
-            "checkpoint": payload["checkpoint_saved"],
-        }
-    )
+    row = {
+        "config": path.stem.rsplit("_seed", 1)[0],
+        "method": payload["method"],
+        "k": "" if payload["k"] is None else payload["k"],
+        "seed": int(path.stem.rsplit("_seed", 1)[1]),
+        "steps": payload["steps"],
+        "grad_accum": payload["gradient_accumulation_steps"],
+        "trainable_parameters": payload["trainable_parameters"],
+        "dev": payload["dev"]["accuracy"],
+        "id_test": payload["id_test"]["accuracy"],
+        "ood_test": payload["ood_test"]["accuracy"],
+        "loss": payload["train_loss_last"],
+        "elapsed_sec": payload["elapsed_sec"],
+        "checkpoint": payload["checkpoint_saved"],
+    }
+    for name, metric in payload.get("diagnostics", {}).items():
+        row[name] = metric["accuracy"]
+    rows.append(row)
 rows.sort(key=lambda row: (method_order.get(row["method"], 999), str(row["k"]), row["seed"]))
 
 print("\nQwen LoRA matrix")
@@ -143,38 +146,94 @@ def std(values):
     mu = mean(values)
     return math.sqrt(sum((value - mu) ** 2 for value in values) / (len(values) - 1))
 
+base_fields = {
+    "config",
+    "method",
+    "k",
+    "seed",
+    "steps",
+    "grad_accum",
+    "trainable_parameters",
+    "dev",
+    "id_test",
+    "ood_test",
+    "loss",
+    "elapsed_sec",
+    "checkpoint",
+}
+diagnostic_keys = sorted({key for row in rows for key in row.keys()} - base_fields)
+
 aggregate = []
 for config, group in sorted(groups.items(), key=lambda item: (method_order.get(item[1][0]["method"], 999), str(item[1][0]["k"]))):
-    aggregate.append(
-        {
-            "config": config,
-            "method": group[0]["method"],
-            "k": group[0]["k"],
-            "steps": group[0]["steps"],
-            "n": len(group),
-            "dev_mean": mean([row["dev"] for row in group]),
-            "dev_std": std([row["dev"] for row in group]),
-            "id_test_mean": mean([row["id_test"] for row in group]),
-            "id_test_std": std([row["id_test"] for row in group]),
-            "ood_test_mean": mean([row["ood_test"] for row in group]),
-            "ood_test_std": std([row["ood_test"] for row in group]),
-            "loss_mean": mean([row["loss"] for row in group if row["loss"] is not None]),
-            "elapsed_sec_mean": mean([row["elapsed_sec"] for row in group]),
-            "trainable_parameters": group[0]["trainable_parameters"],
-        }
-    )
+    item = {
+        "config": config,
+        "method": group[0]["method"],
+        "k": group[0]["k"],
+        "steps": group[0]["steps"],
+        "n": len(group),
+        "dev_mean": mean([row["dev"] for row in group]),
+        "dev_std": std([row["dev"] for row in group]),
+        "id_test_mean": mean([row["id_test"] for row in group]),
+        "id_test_std": std([row["id_test"] for row in group]),
+        "ood_test_mean": mean([row["ood_test"] for row in group]),
+        "ood_test_std": std([row["ood_test"] for row in group]),
+        "loss_mean": mean([row["loss"] for row in group if row["loss"] is not None]),
+        "elapsed_sec_mean": mean([row["elapsed_sec"] for row in group]),
+        "trainable_parameters": group[0]["trainable_parameters"],
+    }
+    for key in diagnostic_keys:
+        values = [row[key] for row in group if key in row]
+        if values:
+            item[f"{key}_mean"] = mean(values)
+            item[f"{key}_std"] = std(values)
+    aggregate.append(item)
 
 (root / "summary.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
 (root / "aggregate.json").write_text(json.dumps(aggregate, indent=2), encoding="utf-8")
 
 if rows:
     with (root / "summary.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        fieldnames = sorted({key for row in rows for key in row.keys()})
+        preferred = [
+            "config",
+            "method",
+            "k",
+            "seed",
+            "steps",
+            "grad_accum",
+            "trainable_parameters",
+            "dev",
+            "id_test",
+            "ood_test",
+            "loss",
+            "elapsed_sec",
+            "checkpoint",
+        ]
+        ordered = [key for key in preferred if key in fieldnames] + [key for key in fieldnames if key not in preferred]
+        writer = csv.DictWriter(f, fieldnames=ordered)
         writer.writeheader()
         writer.writerows(rows)
 if aggregate:
     with (root / "aggregate.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(aggregate[0].keys()))
+        fieldnames = sorted({key for row in aggregate for key in row.keys()})
+        preferred = [
+            "config",
+            "method",
+            "k",
+            "steps",
+            "n",
+            "trainable_parameters",
+            "dev_mean",
+            "dev_std",
+            "id_test_mean",
+            "id_test_std",
+            "ood_test_mean",
+            "ood_test_std",
+            "loss_mean",
+            "elapsed_sec_mean",
+        ]
+        ordered = [key for key in preferred if key in fieldnames] + [key for key in fieldnames if key not in preferred]
+        writer = csv.DictWriter(f, fieldnames=ordered)
         writer.writeheader()
         writer.writerows(aggregate)
 PY

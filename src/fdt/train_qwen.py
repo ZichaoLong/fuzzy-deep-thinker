@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,11 @@ def main() -> None:
     parser.add_argument("--eval-mode", choices=["generate", "binary_choice"], default="binary_choice")
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--eval-examples", type=int, default=16)
+    parser.add_argument(
+        "--diagnostic-metadata-keys",
+        default="",
+        help="Comma-separated metadata keys to group dev/id/ood evaluation by. Use answer for labels.",
+    )
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -126,6 +132,11 @@ def main() -> None:
     if args.save_checkpoint is not None:
         save_training_checkpoint(model, args, trainable, total)
 
+    eval_splits = {
+        "dev": dev_examples[: args.eval_examples],
+        "id_test": id_examples[: args.eval_examples],
+        "ood_test": ood_examples[: args.eval_examples],
+    }
     metrics = {
         "model_name_or_path": args.model_name_or_path,
         "task": args.task,
@@ -151,7 +162,7 @@ def main() -> None:
         "dev": evaluate(
             model,
             tokenizer,
-            dev_examples[: args.eval_examples],
+            eval_splits["dev"],
             args.method,
             args.k,
             args.device,
@@ -162,7 +173,7 @@ def main() -> None:
         "id_test": evaluate(
             model,
             tokenizer,
-            id_examples[: args.eval_examples],
+            eval_splits["id_test"],
             args.method,
             args.k,
             args.device,
@@ -173,7 +184,7 @@ def main() -> None:
         "ood_test": evaluate(
             model,
             tokenizer,
-            ood_examples[: args.eval_examples],
+            eval_splits["ood_test"],
             args.method,
             args.k,
             args.device,
@@ -182,6 +193,9 @@ def main() -> None:
             args.case_examples,
         ),
     }
+    diagnostics = run_diagnostics(model, tokenizer, args, eval_splits)
+    if diagnostics:
+        metrics["diagnostics"] = diagnostics
     print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -539,6 +553,45 @@ def evaluate_binary_choice(model, tokenizer, examples, method, k, device, max_tr
                 predictions.append(sample)
             record_case(cases, {**sample, "prompt": example.prompt[:500], "metadata": example.metadata}, ok, case_examples)
     return {"accuracy": correct / max(1, len(examples)), "num_examples": len(examples), "samples": predictions, "cases": cases}
+
+
+def run_diagnostics(model, tokenizer, args: argparse.Namespace, eval_splits: dict[str, list[Example]]) -> dict:
+    diagnostics = {}
+    if not args.diagnostic_metadata_keys:
+        return diagnostics
+
+    keys = [key.strip() for key in args.diagnostic_metadata_keys.split(",") if key.strip()]
+    for split_name, examples in eval_splits.items():
+        for key in keys:
+            groups: dict[str, list[Example]] = defaultdict(list)
+            for example in examples:
+                groups[diagnostic_value(example, key)].append(example)
+            for value, group in sorted(groups.items()):
+                diagnostics[f"{split_name}_{slug(key)}_{slug(value)}"] = evaluate(
+                    model,
+                    tokenizer,
+                    group,
+                    args.method,
+                    args.k,
+                    args.device,
+                    args.max_new_tokens,
+                    args.eval_mode,
+                    args.case_examples,
+                )
+    return diagnostics
+
+
+def diagnostic_value(example: Example, key: str) -> str:
+    if key == "answer":
+        return example.answer
+    value = example.metadata.get(key, "missing")
+    if value is None:
+        return "none"
+    return str(value)
+
+
+def slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(value)).strip("_")
 
 
 def candidate_nll(model, tokenizer, prefix: str, candidate_ids, device: str):
