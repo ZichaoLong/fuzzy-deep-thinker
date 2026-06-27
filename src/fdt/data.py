@@ -37,8 +37,22 @@ def debug_split_sizes() -> SplitSizes:
     return SplitSizes(train=2_000, dev=200, id_test=200, ood_test=200)
 
 
+def large_split_sizes() -> SplitSizes:
+    return SplitSizes(train=100_000, dev=1_000, id_test=1_000, ood_test=1_000)
+
+
 def smoke_split_sizes() -> SplitSizes:
     return SplitSizes(train=128, dev=32, id_test=32, ood_test=32)
+
+
+def split_sizes(preset: str) -> SplitSizes:
+    if preset == "smoke":
+        return smoke_split_sizes()
+    if preset == "debug":
+        return debug_split_sizes()
+    if preset == "large":
+        return large_split_sizes()
+    raise ValueError(f"Unknown data preset: {preset}")
 
 
 def example_from_dict(payload: dict) -> Example:
@@ -89,7 +103,7 @@ def build_dataset(root: Path, tasks: Iterable[str], sizes: SplitSizes, difficult
 def main() -> None:
     parser = argparse.ArgumentParser(description="Materialize FDT synthetic train/dev/test splits.")
     parser.add_argument("--task", choices=[*list_tasks(), "all"], default="graph_reachability")
-    parser.add_argument("--preset", choices=["smoke", "debug"], default="smoke")
+    parser.add_argument("--preset", choices=["smoke", "debug", "large"], default="smoke")
     parser.add_argument(
         "--difficulty",
         choices=["standard", "easy", "easy_ladder", "hard_ladder", "simple"],
@@ -99,7 +113,7 @@ def main() -> None:
     args = parser.parse_args()
 
     tasks = list_tasks() if args.task == "all" else [args.task]
-    sizes = smoke_split_sizes() if args.preset == "smoke" else debug_split_sizes()
+    sizes = split_sizes(args.preset)
     for path in build_dataset(args.out_dir, tasks, sizes, difficulty=args.difficulty):
         print(path)
 

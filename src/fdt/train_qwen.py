@@ -8,7 +8,7 @@ from pathlib import Path
 import random
 import time
 
-from .data import build_dataset, dataset_path, debug_split_sizes, read_jsonl, smoke_split_sizes
+from .data import build_dataset, dataset_path, read_jsonl, split_sizes
 from .formats import Method, continuous_item, format_text
 from .tasks import Example, verify_answer
 
@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--method", choices=["direct", "cot", "masked_cot", "soft", "latent"], default="direct")
     parser.add_argument("--data-dir", type=Path, default=Path("data/qwen_smoke"))
     parser.add_argument("--build-data", action="store_true")
-    parser.add_argument("--data-preset", choices=["smoke", "debug"], default="smoke")
+    parser.add_argument("--data-preset", choices=["smoke", "debug", "large"], default="smoke")
     parser.add_argument(
         "--difficulty",
         choices=["standard", "easy", "easy_ladder", "hard_ladder", "simple"],
@@ -48,6 +48,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--micro-batch-size", type=int, default=1)
     parser.add_argument(
         "--train-sampling",
         choices=["random", "balanced_answer"],
@@ -129,6 +130,8 @@ def main() -> None:
 
     if args.gradient_accumulation_steps < 1:
         raise ValueError("--gradient-accumulation-steps must be >= 1")
+    if args.micro_batch_size < 1:
+        raise ValueError("--micro-batch-size must be >= 1")
 
     if args.build_data or not dataset_path(args.data_dir, "train", args.task).exists():
         build_dataset(args.data_dir, [args.task], split_sizes(args.data_preset), difficulty=args.difficulty)
@@ -184,9 +187,13 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         micro_losses = []
         for micro_idx in range(args.gradient_accumulation_steps):
-            example = train_sampler(step, micro_idx)
-            train_sample_answer_counts[example.answer] += 1
-            raw_loss = loss_for_example(model, tokenizer, example, args.method, args.k, args.device)
+            batch = []
+            for batch_idx in range(args.micro_batch_size):
+                sample_idx = micro_idx * args.micro_batch_size + batch_idx
+                example = train_sampler(step, sample_idx)
+                train_sample_answer_counts[example.answer] += 1
+                batch.append(example)
+            raw_loss = loss_for_examples(model, tokenizer, batch, args.method, args.k, args.device)
             (raw_loss / args.gradient_accumulation_steps).backward()
             micro_losses.append(float(raw_loss.detach().cpu()))
         optimizer.step()
@@ -294,6 +301,8 @@ def main() -> None:
         "max_train_seconds": args.max_train_seconds if args.max_train_seconds > 0 else None,
         "train_sampling": args.train_sampling,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "micro_batch_size": args.micro_batch_size,
+        "effective_batch_size": args.micro_batch_size * args.gradient_accumulation_steps,
         "k": args.k if args.method in {"soft", "latent"} else None,
         "use_lora": args.use_lora,
         "lora_r": args.lora_r if args.use_lora else None,
@@ -353,14 +362,6 @@ def load_model(args: argparse.Namespace):
     if args.use_lora:
         model = apply_lora(model, args)
     return tokenizer, HFContinuousWrapper(model, soft_temperature=args.soft_temperature)
-
-
-def split_sizes(preset: str):
-    if preset == "smoke":
-        return smoke_split_sizes()
-    if preset == "debug":
-        return debug_split_sizes()
-    raise ValueError(f"Unknown data preset: {preset}")
 
 
 def make_training_sampler(examples: list[Example], sampling: str, seed: int):
@@ -486,6 +487,8 @@ def save_training_checkpoint(
         "completed_steps": completed_steps,
         "train_sampling": getattr(args, "train_sampling", "random"),
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "micro_batch_size": getattr(args, "micro_batch_size", 1),
+        "effective_batch_size": getattr(args, "micro_batch_size", 1) * args.gradient_accumulation_steps,
         "seed": args.seed,
         "use_lora": args.use_lora,
         "lora_r": args.lora_r if args.use_lora else None,
@@ -562,6 +565,19 @@ def HFContinuousWrapper(model, soft_temperature: float = 1.0):
             supervised_logits = logits[:, start:end, :].squeeze(0).float()
             return F.cross_entropy(supervised_logits, answer_ids)
 
+        def continuous_batch_loss(self, prefix_id_list, answer_id_list, num_steps: int, mode: Method, pad_token_id: int):
+            import torch
+            import torch.nn.functional as F
+
+            suffix_id_list = [ids[:-1] for ids in answer_id_list]
+            logits, start = self._continuous_batch_logits(prefix_id_list, suffix_id_list, num_steps, mode, pad_token_id)
+            losses = []
+            for idx, answer_ids in enumerate(answer_id_list):
+                end = start + answer_ids.numel()
+                supervised_logits = logits[idx, start:end, :].float()
+                losses.append(F.cross_entropy(supervised_logits, answer_ids))
+            return torch.stack(losses).mean()
+
         def continuous_candidate_nll(self, prefix_ids, candidate_ids, num_steps: int, mode: Method):
             import torch.nn.functional as F
 
@@ -582,7 +598,7 @@ def HFContinuousWrapper(model, soft_temperature: float = 1.0):
             import torch
 
             seq_embeds = self.model.get_input_embeddings()(prefix_ids.unsqueeze(0))
-            seq_embeds = self._append_continuous_steps(seq_embeds, num_steps, mode)
+            seq_embeds, _ = self._append_continuous_steps(seq_embeds, num_steps, mode)
 
             generated = []
             for _ in range(max_new_tokens):
@@ -600,20 +616,54 @@ def HFContinuousWrapper(model, soft_temperature: float = 1.0):
             import torch
 
             seq_embeds = self.model.get_input_embeddings()(prefix_ids.unsqueeze(0))
-            seq_embeds = self._append_continuous_steps(seq_embeds, num_steps, mode)
+            seq_embeds, _ = self._append_continuous_steps(seq_embeds, num_steps, mode)
             if suffix_input_ids.numel() > 0:
                 suffix_embeds = self.model.get_input_embeddings()(suffix_input_ids.unsqueeze(0))
                 seq_embeds = torch.cat([seq_embeds, suffix_embeds], dim=1)
             return self.model(inputs_embeds=seq_embeds, use_cache=False).logits
 
-        def _append_continuous_steps(self, seq_embeds, num_steps: int, mode: Method):
+        def _continuous_batch_logits(self, prefix_id_list, suffix_id_list, num_steps: int, mode: Method, pad_token_id: int):
+            import torch
+
+            prefix_ids, attention_mask = self._left_pad_ids(prefix_id_list, pad_token_id)
+            seq_embeds = self.model.get_input_embeddings()(prefix_ids)
+            seq_embeds, attention_mask = self._append_continuous_steps(seq_embeds, num_steps, mode, attention_mask)
+            suffix_ids, suffix_mask = self._right_pad_ids(suffix_id_list, pad_token_id)
+            if suffix_ids.size(1) > 0:
+                suffix_embeds = self.model.get_input_embeddings()(suffix_ids)
+                seq_embeds = torch.cat([seq_embeds, suffix_embeds], dim=1)
+                attention_mask = torch.cat([attention_mask, suffix_mask], dim=1)
+            position_ids = self._position_ids(attention_mask)
+            logits = self.model(
+                inputs_embeds=seq_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=False,
+            ).logits
+            return logits, prefix_ids.size(1) + num_steps - 1
+
+        def _append_continuous_steps(self, seq_embeds, num_steps: int, mode: Method, attention_mask=None):
             import torch
 
             for _ in range(num_steps):
-                outputs = self.model(inputs_embeds=seq_embeds, output_hidden_states=True, use_cache=False)
+                position_ids = self._position_ids(attention_mask)
+                outputs = self.model(
+                    inputs_embeds=seq_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    output_hidden_states=True,
+                    use_cache=False,
+                )
                 next_embed = self._next_continuous_embed(outputs, mode)
                 seq_embeds = torch.cat([seq_embeds, next_embed.unsqueeze(1)], dim=1)
-            return seq_embeds
+                if attention_mask is not None:
+                    ones = torch.ones(
+                        (attention_mask.size(0), 1),
+                        device=attention_mask.device,
+                        dtype=attention_mask.dtype,
+                    )
+                    attention_mask = torch.cat([attention_mask, ones], dim=1)
+            return seq_embeds, attention_mask
 
         def _next_continuous_embed(self, outputs, mode: Method):
             import torch
@@ -628,30 +678,84 @@ def HFContinuousWrapper(model, soft_temperature: float = 1.0):
                 return probs.to(embedding_weight.dtype) @ embedding_weight
             raise ValueError(f"Unknown continuous mode: {mode}")
 
+        def _left_pad_ids(self, id_list, pad_token_id: int):
+            import torch
+
+            batch = len(id_list)
+            max_len = max(ids.numel() for ids in id_list)
+            device = id_list[0].device
+            dtype = id_list[0].dtype
+            ids_out = torch.full((batch, max_len), pad_token_id, device=device, dtype=dtype)
+            attention_mask = torch.zeros((batch, max_len), device=device, dtype=torch.long)
+            for idx, ids in enumerate(id_list):
+                length = ids.numel()
+                ids_out[idx, max_len - length :] = ids
+                attention_mask[idx, max_len - length :] = 1
+            return ids_out, attention_mask
+
+        def _right_pad_ids(self, id_list, pad_token_id: int):
+            import torch
+
+            batch = len(id_list)
+            max_len = max((ids.numel() for ids in id_list), default=0)
+            device = id_list[0].device
+            dtype = id_list[0].dtype
+            ids_out = torch.full((batch, max_len), pad_token_id, device=device, dtype=dtype)
+            attention_mask = torch.zeros((batch, max_len), device=device, dtype=torch.long)
+            for idx, ids in enumerate(id_list):
+                length = ids.numel()
+                if length == 0:
+                    continue
+                ids_out[idx, :length] = ids
+                attention_mask[idx, :length] = 1
+            return ids_out, attention_mask
+
+        def _position_ids(self, attention_mask):
+            if attention_mask is None:
+                return None
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            return position_ids.masked_fill(attention_mask == 0, 0)
+
     return _HFContinuousWrapper(model, soft_temperature)
 
 
 def loss_for_example(model, tokenizer, example: Example, method: Method, k: int, device: str):
+    return loss_for_examples(model, tokenizer, [example], method, k, device)
+
+
+def loss_for_examples(model, tokenizer, examples: list[Example], method: Method, k: int, device: str):
     import torch
 
     if method in {"direct", "cot", "masked_cot"}:
-        item = format_text(example, method)
-        encoded = encode_with_offsets(tokenizer, item.text)
-        ids = torch.tensor(encoded["input_ids"], device=device, dtype=torch.long)
-        labels = ids.clone()
-        loss_mask = loss_mask_from_offsets(encoded, item.loss_start, device)
-        if loss_mask is None:
-            prefix_len = len(tokenizer(item.text[: item.loss_start], add_special_tokens=False)["input_ids"])
-            labels[:prefix_len] = -100
-        else:
-            labels[loss_mask] = -100
-        outputs = model.model(input_ids=ids.unsqueeze(0), use_cache=False)
-        return causal_lm_loss(outputs.logits, labels.unsqueeze(0))
+        items = [format_text(example, method) for example in examples]
+        encoded_items = [encode_with_offsets(tokenizer, item.text) for item in items]
+        max_len = max(len(encoded["input_ids"]) for encoded in encoded_items)
+        pad_token_id = tokenizer.pad_token_id
+        input_ids = torch.full((len(items), max_len), pad_token_id, device=device, dtype=torch.long)
+        labels = torch.full((len(items), max_len), -100, device=device, dtype=torch.long)
+        attention_mask = torch.zeros((len(items), max_len), device=device, dtype=torch.long)
+        for idx, (item, encoded) in enumerate(zip(items, encoded_items)):
+            ids = torch.tensor(encoded["input_ids"], device=device, dtype=torch.long)
+            seq_len = ids.numel()
+            input_ids[idx, :seq_len] = ids
+            attention_mask[idx, :seq_len] = 1
+            item_labels = ids.clone()
+            loss_mask = loss_mask_from_offsets(encoded, item.loss_start, device)
+            if loss_mask is None:
+                prefix_len = len(tokenizer(item.text[: item.loss_start], add_special_tokens=False)["input_ids"])
+                item_labels[:prefix_len] = -100
+            else:
+                item_labels[loss_mask] = -100
+            labels[idx, :seq_len] = item_labels
+        outputs = model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+        return causal_lm_loss(outputs.logits, labels)
 
-    item = continuous_item(example)
-    prefix_ids = encode(tokenizer, item.prefix, device)
-    answer_ids = encode(tokenizer, item.answer, device)
-    return model.continuous_loss(prefix_ids, answer_ids, num_steps=k, mode=method)
+    items = [continuous_item(example) for example in examples]
+    prefix_ids = [encode(tokenizer, item.prefix, device) for item in items]
+    answer_ids = [encode(tokenizer, item.answer, device) for item in items]
+    if len(examples) == 1:
+        return model.continuous_loss(prefix_ids[0], answer_ids[0], num_steps=k, mode=method)
+    return model.continuous_batch_loss(prefix_ids, answer_ids, num_steps=k, mode=method, pad_token_id=tokenizer.pad_token_id)
 
 
 def evaluate(model, tokenizer, examples, method, k, device, max_new_tokens, eval_mode, case_examples):

@@ -4,6 +4,7 @@ import argparse
 import ast
 import json
 from pathlib import Path
+import subprocess
 
 
 def main() -> None:
@@ -20,12 +21,18 @@ def main() -> None:
 
     manifest_path = output_dir / "manifest.tsv"
     rows = read_manifest(manifest_path)
+    live_sessions = tmux_sessions()
     print(f"output_dir: {output_dir}")
     print("session\tdevice\tconfig\tseed\tstatus\tstep\tloss_ema\tprobe\tdev\tid\tood")
     for row in rows:
         output_json = Path(row["output_json"])
         log_path = Path(row["log"])
-        status = "complete" if output_json.exists() else "running"
+        if output_json.exists():
+            status = "complete"
+        elif row["session"] in live_sessions:
+            status = "running"
+        else:
+            status = "not_running"
         final = read_json(output_json) if output_json.exists() else {}
         log_state = read_last_progress(log_path)
 
@@ -59,6 +66,21 @@ def read_manifest(path: Path) -> list[dict[str, str]]:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def tmux_sessions() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 def read_last_progress(path: Path) -> dict:

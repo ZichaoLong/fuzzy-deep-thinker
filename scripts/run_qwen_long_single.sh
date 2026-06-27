@@ -17,6 +17,7 @@ SEED="${SEED:-0}"
 STEPS="${STEPS:-100000000}"
 MAX_TRAIN_SECONDS="${MAX_TRAIN_SECONDS:-172800}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-4}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 TRAIN_SAMPLING="${TRAIN_SAMPLING:-balanced_answer}"
 LOG_INTERVAL_STEPS="${LOG_INTERVAL_STEPS:-100}"
 CHECKPOINT_INTERVAL_STEPS="${CHECKPOINT_INTERVAL_STEPS:-20000}"
@@ -72,7 +73,7 @@ fi
 output_path="${OUTPUT_DIR}/${suffix}_seed${SEED}.json"
 checkpoint_path="${CHECKPOINT_DIR}/${suffix}_seed${SEED}.pt"
 
-echo "Running long Qwen job: method=${METHOD} k=${K} seed=${SEED} device=${DEVICE} visible=${ASCEND_RT_VISIBLE_DEVICES:-unset}"
+echo "Running long Qwen job: method=${METHOD} k=${K} seed=${SEED} device=${DEVICE} visible=${ASCEND_RT_VISIBLE_DEVICES:-unset} micro_batch=${MICRO_BATCH_SIZE} grad_accum=${GRAD_ACCUM_STEPS}"
 echo "Output: ${output_path}"
 
 PYTHONUNBUFFERED=1 PYTHONPATH="src:${PYTHONPATH:-}" "${PYTHON}" -m fdt.train_qwen \
@@ -88,6 +89,7 @@ PYTHONUNBUFFERED=1 PYTHONPATH="src:${PYTHONPATH:-}" "${PYTHON}" -m fdt.train_qwe
   --steps "${STEPS}" \
   --max-train-seconds "${MAX_TRAIN_SECONDS}" \
   --gradient-accumulation-steps "${GRAD_ACCUM_STEPS}" \
+  --micro-batch-size "${MICRO_BATCH_SIZE}" \
   --train-sampling "${TRAIN_SAMPLING}" \
   --log-interval-steps "${LOG_INTERVAL_STEPS}" \
   --checkpoint-interval-steps "${CHECKPOINT_INTERVAL_STEPS}" \

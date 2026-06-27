@@ -1,5 +1,6 @@
 from argparse import Namespace
 
+from fdt.data import split_sizes
 from fdt.tasks import generate_example
 from fdt.train_qwen import make_training_sampler, records_to_metric, run_diagnostics, select_balanced_examples
 
@@ -49,6 +50,16 @@ def test_balanced_answer_sampler_alternates_binary_labels():
     sampled = [sampler(step, micro_idx).answer for step in range(1, 11) for micro_idx in range(4)]
 
     assert sampled.count("YES") == sampled.count("NO")
+
+
+def test_large_split_sizes_are_substantially_larger_than_debug():
+    debug = split_sizes("debug")
+    large = split_sizes("large")
+
+    assert large.train >= 50 * debug.train
+    assert large.dev > debug.dev
+    assert large.id_test > debug.id_test
+    assert large.ood_test > debug.ood_test
 
 
 def test_select_balanced_examples_keeps_binary_labels():
