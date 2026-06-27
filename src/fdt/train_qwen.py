@@ -7,7 +7,7 @@ from pathlib import Path
 import random
 import time
 
-from .data import build_dataset, dataset_path, read_jsonl, smoke_split_sizes
+from .data import build_dataset, dataset_path, debug_split_sizes, read_jsonl, smoke_split_sizes
 from .formats import Method, continuous_item, format_text
 from .tasks import Example, verify_answer
 
@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--method", choices=["direct", "cot", "masked_cot", "soft", "latent"], default="direct")
     parser.add_argument("--data-dir", type=Path, default=Path("data/qwen_smoke"))
     parser.add_argument("--build-data", action="store_true")
+    parser.add_argument("--data-preset", choices=["smoke", "debug"], default="smoke")
     parser.add_argument("--difficulty", choices=["standard", "easy", "easy_ladder", "simple"], default="easy_ladder")
     parser.add_argument("--device", default="cpu", help="cpu or npu:0")
     parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
@@ -30,12 +31,24 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--soft-temperature", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--case-examples", type=int, default=2)
+    parser.add_argument("--use-lora", action="store_true")
+    parser.add_argument("--lora-r", type=int, default=8)
+    parser.add_argument("--lora-alpha", type=int, default=16)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--lora-target-modules",
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated module names for LoRA injection.",
+    )
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--save-checkpoint", type=Path, default=None)
+    parser.add_argument("--load-checkpoint", type=Path, default=None)
+    parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -57,8 +70,11 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError("--gradient-accumulation-steps must be >= 1")
+
     if args.build_data or not dataset_path(args.data_dir, "train", args.task).exists():
-        build_dataset(args.data_dir, [args.task], smoke_split_sizes(), difficulty=args.difficulty)
+        build_dataset(args.data_dir, [args.task], split_sizes(args.data_preset), difficulty=args.difficulty)
 
     train_examples = read_jsonl(dataset_path(args.data_dir, "train", args.task))
     dev_examples = read_jsonl(dataset_path(args.data_dir, "dev", args.task))
@@ -66,59 +82,71 @@ def main() -> None:
     ood_examples = read_jsonl(dataset_path(args.data_dir, "ood_test", args.task))
 
     tokenizer, model = load_model(args)
+    load_info = None
+    if args.load_checkpoint is not None:
+        load_info = load_training_checkpoint(model, args.load_checkpoint)
     model = model.to(args.device)
-    model.train()
+    set_latent_adapter_trainable(model, args.method == "latent")
 
     if args.gradient_checkpointing:
         model.model.gradient_checkpointing_enable()
+        if hasattr(model.model, "enable_input_require_grads"):
+            model.model.enable_input_require_grads()
 
     if args.freeze_backbone:
-        for parameter in model.model.parameters():
-            parameter.requires_grad_(False)
+        for name, parameter in model.model.named_parameters():
+            if "lora_" not in name:
+                parameter.requires_grad_(False)
 
-    trainable_parameters = [p for p in model.parameters() if p.requires_grad]
-    if not trainable_parameters:
-        raise ValueError("No trainable parameters remain. Disable --freeze-backbone or use a trainable adapter.")
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=args.lr)
+    trainable, total = parameter_counts(model)
+    losses = []
+    if not args.eval_only:
+        model.train()
+        trainable_parameters = [p for p in model.parameters() if p.requires_grad]
+        if not trainable_parameters:
+            raise ValueError("No trainable parameters remain. Disable --freeze-backbone or use a trainable adapter.")
+        optimizer = torch.optim.AdamW(trainable_parameters, lr=args.lr)
 
     start_time = time.time()
-    losses = []
     for step in range(1, args.steps + 1):
-        example = random.choice(train_examples)
-        loss = loss_for_example(model, tokenizer, example, args.method, args.k, args.device)
+        if args.eval_only:
+            break
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        micro_losses = []
+        for _ in range(args.gradient_accumulation_steps):
+            example = random.choice(train_examples)
+            raw_loss = loss_for_example(model, tokenizer, example, args.method, args.k, args.device)
+            (raw_loss / args.gradient_accumulation_steps).backward()
+            micro_losses.append(float(raw_loss.detach().cpu()))
         optimizer.step()
-        losses.append(float(loss.detach().cpu()))
+        losses.append(sum(micro_losses) / len(micro_losses))
         if step == 1 or step % max(1, args.steps // 4) == 0:
             print({"step": step, "loss": round(losses[-1], 4)}, flush=True)
 
     if args.save_checkpoint is not None:
-        args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
-                "model_name_or_path": args.model_name_or_path,
-                "task": args.task,
-                "method": args.method,
-                "difficulty": args.difficulty,
-                "k": args.k if args.method in {"soft", "latent"} else None,
-                "steps": args.steps,
-                "seed": args.seed,
-            },
-            args.save_checkpoint,
-        )
+        save_training_checkpoint(model, args, trainable, total)
 
     metrics = {
         "model_name_or_path": args.model_name_or_path,
         "task": args.task,
         "method": args.method,
         "difficulty": args.difficulty,
+        "data_preset": args.data_preset,
         "eval_mode": args.eval_mode,
         "steps": args.steps,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "k": args.k if args.method in {"soft", "latent"} else None,
+        "use_lora": args.use_lora,
+        "lora_r": args.lora_r if args.use_lora else None,
+        "lora_alpha": args.lora_alpha if args.use_lora else None,
+        "lora_dropout": args.lora_dropout if args.use_lora else None,
+        "lora_target_modules": lora_target_modules(args) if args.use_lora else None,
+        "trainable_parameters": trainable,
+        "total_parameters": total,
         "train_loss_last": losses[-1] if losses else None,
         "elapsed_sec": round(time.time() - start_time, 3),
+        "checkpoint_loaded": str(args.load_checkpoint) if args.load_checkpoint is not None else None,
+        "checkpoint_load_info": load_info,
         "checkpoint_saved": str(args.save_checkpoint) if args.save_checkpoint is not None else None,
         "dev": evaluate(
             model,
@@ -186,7 +214,126 @@ def load_model(args: argparse.Namespace):
         low_cpu_mem_usage=True,
     )
     model.config.use_cache = False
+    if args.use_lora:
+        model = apply_lora(model, args)
     return tokenizer, HFContinuousWrapper(model, soft_temperature=args.soft_temperature)
+
+
+def split_sizes(preset: str):
+    if preset == "smoke":
+        return smoke_split_sizes()
+    if preset == "debug":
+        return debug_split_sizes()
+    raise ValueError(f"Unknown data preset: {preset}")
+
+
+def lora_target_modules(args: argparse.Namespace) -> list[str]:
+    return [name.strip() for name in args.lora_target_modules.split(",") if name.strip()]
+
+
+def apply_lora(model, args: argparse.Namespace):
+    from peft import LoraConfig, TaskType, get_peft_model
+
+    config = LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+        target_modules=lora_target_modules(args),
+    )
+    model = get_peft_model(model, config)
+    model.print_trainable_parameters()
+    return model
+
+
+def parameter_counts(model) -> tuple[int, int]:
+    total = 0
+    trainable = 0
+    for parameter in model.parameters():
+        count = parameter.numel()
+        total += count
+        if parameter.requires_grad:
+            trainable += count
+    return trainable, total
+
+
+def set_latent_adapter_trainable(model, trainable: bool) -> None:
+    for module in (model.latent_norm, model.latent_proj):
+        for parameter in module.parameters():
+            parameter.requires_grad_(trainable)
+
+
+def continuous_adapter_state(model) -> dict:
+    return {
+        key: value.detach().cpu()
+        for key, value in model.state_dict().items()
+        if key.startswith("latent_norm.") or key.startswith("latent_proj.")
+    }
+
+
+def save_training_checkpoint(model, args: argparse.Namespace, trainable_parameters: int, total_parameters: int) -> None:
+    import torch
+
+    args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checkpoint_format": "fdt_qwen_v1",
+        "model_name_or_path": args.model_name_or_path,
+        "task": args.task,
+        "method": args.method,
+        "difficulty": args.difficulty,
+        "data_preset": args.data_preset,
+        "k": args.k if args.method in {"soft", "latent"} else None,
+        "steps": args.steps,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "seed": args.seed,
+        "use_lora": args.use_lora,
+        "lora_r": args.lora_r if args.use_lora else None,
+        "lora_alpha": args.lora_alpha if args.use_lora else None,
+        "lora_dropout": args.lora_dropout if args.use_lora else None,
+        "lora_target_modules": lora_target_modules(args) if args.use_lora else None,
+        "trainable_parameters": trainable_parameters,
+        "total_parameters": total_parameters,
+        "continuous_adapter_state": continuous_adapter_state(model),
+    }
+    if args.use_lora:
+        from peft import get_peft_model_state_dict
+
+        payload["lora_state"] = {
+            key: value.detach().cpu() for key, value in get_peft_model_state_dict(model.model).items()
+        }
+        payload["model_state"] = None
+    else:
+        payload["lora_state"] = None
+        payload["model_state"] = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+    torch.save(payload, args.save_checkpoint)
+
+
+def load_training_checkpoint(model, checkpoint_path: Path) -> dict:
+    import torch
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    info = {
+        "checkpoint_format": checkpoint.get("checkpoint_format", "unknown"),
+        "use_lora": checkpoint.get("use_lora"),
+    }
+    if checkpoint.get("lora_state") is not None:
+        from peft import set_peft_model_state_dict
+
+        if not hasattr(model.model, "peft_config"):
+            raise ValueError("Checkpoint contains LoRA weights, but the current model was not created with --use-lora.")
+        set_peft_model_state_dict(model.model, checkpoint["lora_state"])
+        info["lora_keys"] = len(checkpoint["lora_state"])
+    elif checkpoint.get("model_state") is not None:
+        result = model.load_state_dict(checkpoint["model_state"], strict=False)
+        info["missing_keys"] = len(result.missing_keys)
+        info["unexpected_keys"] = len(result.unexpected_keys)
+
+    continuous_state = checkpoint.get("continuous_adapter_state")
+    if continuous_state:
+        model.load_state_dict(continuous_state, strict=False)
+        info["continuous_adapter_keys"] = sorted(continuous_state.keys())
+    return info
 
 
 def HFContinuousWrapper(model, soft_temperature: float = 1.0):

@@ -100,8 +100,57 @@ scripts/with_conda_npu.sh scripts/run_qwen_smoke.sh
 
 ## 当前限制
 
-- `fdt.train_qwen` 当前默认全参数微调；后续更适合接 LoRA / QLoRA，降低显存和训练成本。
+- `fdt.train_qwen` 支持 `--use-lora`，正式 Qwen 小矩阵应优先使用 LoRA，降低显存、checkpoint 和优化稳定性风险。
 - Ascend NPU 上不建议用 full-parameter FP16 AdamW 训练 Qwen，最小 smoke 中观察到它可能导致候选打分变成 `NaN`；当前 runner 默认使用 `bfloat16`。
 - `soft` 方法会计算全 vocabulary 的 soft embedding，显存和速度压力比 `latent` 更大。
 - `masked_cot` 存在 train/test mismatch，只应作为诊断 baseline。
 - Qwen smoke 的小步数结果只能验证代码路径，不能作为研究结论。
+
+## Qwen LoRA Matrix
+
+正式的小规模 Qwen 对照建议先跑 LoRA 矩阵：
+
+```bash
+HTTP_PROXY=http://127.0.0.1:7890 \
+HTTPS_PROXY=http://127.0.0.1:7890 \
+ALL_PROXY=socks5h://127.0.0.1:7891 \
+NO_PROXY=localhost,127.0.0.1 \
+scripts/with_conda_npu.sh scripts/run_qwen_lora_matrix.sh
+```
+
+默认配置：
+
+```text
+model:   Qwen/Qwen3-0.6B-Base
+task:    graph_reachability / easy_ladder
+methods: direct, cot, masked_cot, soft_k1, latent_k1
+seeds:   0, 1
+steps:   80 optimizer updates
+eval:    16 examples per split
+dtype:   bfloat16
+LoRA:    r=8, alpha=16, dropout=0.05
+```
+
+如果本机已经缓存 `Qwen/Qwen3-0.6B-Base`，runner 默认会自动切换到 Hugging Face cache 里的 snapshot 目录，并传入 `--local-files-only`，避免后台长任务被 Hugging Face metadata 请求或代理波动中断。
+
+输出：
+
+```text
+outputs/qwen_lora_matrix/
+  aggregate.csv
+  summary.csv
+  *_seed*.json
+  checkpoints/*.pt
+```
+
+checkpoint 支持：
+
+```bash
+PYTHONPATH=src scripts/with_conda_npu.sh python -m fdt.train_qwen \
+  --use-lora \
+  --load-checkpoint outputs/qwen_lora_matrix/checkpoints/direct_seed0.pt \
+  --eval-only \
+  --steps 0 \
+  --eval-examples 16 \
+  --output outputs/qwen_lora_matrix/direct_seed0_eval_reload.json
+```

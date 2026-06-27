@@ -6,6 +6,7 @@ DIFFICULTY="${DIFFICULTY:-easy_ladder}"
 DATA_DIR="${DATA_DIR:-data/qwen_smoke}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/qwen_smoke}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-0.6B-Base}"
+LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-auto}"
 DEVICE="${DEVICE:-npu:0}"
 DTYPE="${DTYPE:-bfloat16}"
 CONFIGS="${CONFIGS:-direct:- cot:- masked_cot:- soft:4 latent:4}"
@@ -16,6 +17,20 @@ LR="${LR:-0.00001}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 CASE_EXAMPLES="${CASE_EXAMPLES:-2}"
 PYTHON="${PYTHON:-python3}"
+
+if [[ "${LOCAL_FILES_ONLY}" == "auto" && "${MODEL_NAME_OR_PATH}" == "Qwen/Qwen3-0.6B-Base" ]]; then
+  snapshot="$(find "${HOME}/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-Base/snapshots" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)"
+  if [[ -n "${snapshot}" ]]; then
+    MODEL_NAME_OR_PATH="${snapshot}"
+    LOCAL_FILES_ONLY="1"
+  else
+    LOCAL_FILES_ONLY="0"
+  fi
+fi
+local_files_args=()
+if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
+  local_files_args=(--local-files-only)
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -38,6 +53,7 @@ for config in ${CONFIGS}; do
   echo "Running Qwen smoke point: model=${MODEL_NAME_OR_PATH} config=${suffix} steps=${STEPS}"
   PYTHONUNBUFFERED=1 PYTHONPATH="src:${PYTHONPATH:-}" "${PYTHON}" -m fdt.train_qwen \
     --model-name-or-path "${MODEL_NAME_OR_PATH}" \
+    "${local_files_args[@]}" \
     --task "${TASK}" \
     --method "${method}" \
     --difficulty "${DIFFICULTY}" \

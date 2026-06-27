@@ -11,6 +11,7 @@ requires-python = ">=3.9"
 [project.optional-dependencies]
 qwen = [
     "accelerate",
+    "peft",
     "safetensors",
     "tokenizers",
     "transformers>=4.51.0",
