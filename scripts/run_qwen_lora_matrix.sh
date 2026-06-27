@@ -15,6 +15,12 @@ CONFIGS="${CONFIGS:-direct:- cot:- masked_cot:- soft:1 latent:1}"
 SEEDS="${SEEDS:-0 1}"
 STEPS="${STEPS:-80}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+TRAIN_SAMPLING="${TRAIN_SAMPLING:-random}"
+LOG_INTERVAL_STEPS="${LOG_INTERVAL_STEPS:-0}"
+MAX_TRAIN_SECONDS="${MAX_TRAIN_SECONDS:-0}"
+CHECKPOINT_INTERVAL_STEPS="${CHECKPOINT_INTERVAL_STEPS:-0}"
+TRAIN_PROBE_EXAMPLES="${TRAIN_PROBE_EXAMPLES:-0}"
+TRAIN_PROBE_INTERVAL_STEPS="${TRAIN_PROBE_INTERVAL_STEPS:-0}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-16}"
 DIAGNOSTIC_METADATA_KEYS="${DIAGNOSTIC_METADATA_KEYS:-}"
 DIAGNOSTIC_CASE_EXAMPLES="${DIAGNOSTIC_CASE_EXAMPLES:-0}"
@@ -75,6 +81,12 @@ for seed in ${SEEDS}; do
       --dtype "${DTYPE}" \
       --steps "${STEPS}" \
       --gradient-accumulation-steps "${GRAD_ACCUM_STEPS}" \
+      --train-sampling "${TRAIN_SAMPLING}" \
+      --log-interval-steps "${LOG_INTERVAL_STEPS}" \
+      --max-train-seconds "${MAX_TRAIN_SECONDS}" \
+      --checkpoint-interval-steps "${CHECKPOINT_INTERVAL_STEPS}" \
+      --train-probe-examples "${TRAIN_PROBE_EXAMPLES}" \
+      --train-probe-interval-steps "${TRAIN_PROBE_INTERVAL_STEPS}" \
       --eval-examples "${EVAL_EXAMPLES}" \
       --diagnostic-metadata-keys "${DIAGNOSTIC_METADATA_KEYS}" \
       --diagnostic-case-examples "${DIAGNOSTIC_CASE_EXAMPLES}" \

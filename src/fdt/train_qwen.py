@@ -48,6 +48,42 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument(
+        "--train-sampling",
+        choices=["random", "balanced_answer"],
+        default="random",
+        help="Training example sampler. balanced_answer alternates labels when binary labels are available.",
+    )
+    parser.add_argument(
+        "--log-interval-steps",
+        type=int,
+        default=0,
+        help="Training progress log interval. 0 keeps the legacy quarter-run logging.",
+    )
+    parser.add_argument(
+        "--max-train-seconds",
+        type=float,
+        default=0.0,
+        help="Stop training after this many wall-clock seconds, then save/evaluate. 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--checkpoint-interval-steps",
+        type=int,
+        default=0,
+        help="Save intermediate checkpoints every N optimizer steps when --save-checkpoint is set.",
+    )
+    parser.add_argument(
+        "--train-probe-examples",
+        type=int,
+        default=0,
+        help="Number of train examples for periodic binary-choice probe evaluation.",
+    )
+    parser.add_argument(
+        "--train-probe-interval-steps",
+        type=int,
+        default=0,
+        help="Run train probe every N optimizer steps. 0 disables periodic probes.",
+    )
     parser.add_argument("--soft-temperature", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--case-examples", type=int, default=2)
@@ -120,7 +156,15 @@ def main() -> None:
                 parameter.requires_grad_(False)
 
     trainable, total = parameter_counts(model)
+    train_sampler = make_training_sampler(train_examples, args.train_sampling, args.seed)
+    train_probe_examples = select_balanced_examples(train_examples, args.train_probe_examples, args.seed + 17)
     losses = []
+    loss_history = []
+    train_probe_history = []
+    train_sample_answer_counts: dict[str, int] = defaultdict(int)
+    completed_steps = 0
+    stop_reason = "eval_only" if args.eval_only else "steps"
+    checkpoint_saved = None
     if not args.eval_only:
         model.train()
         trainable_parameters = [p for p in model.parameters() if p.requires_grad]
@@ -129,23 +173,90 @@ def main() -> None:
         optimizer = torch.optim.AdamW(trainable_parameters, lr=args.lr)
 
     start_time = time.time()
+    loss_ema = None
+    log_interval = args.log_interval_steps if args.log_interval_steps > 0 else max(1, args.steps // 4)
     for step in range(1, args.steps + 1):
         if args.eval_only:
             break
+        if args.max_train_seconds > 0 and time.time() - start_time >= args.max_train_seconds:
+            stop_reason = "max_train_seconds"
+            break
         optimizer.zero_grad(set_to_none=True)
         micro_losses = []
-        for _ in range(args.gradient_accumulation_steps):
-            example = random.choice(train_examples)
+        for micro_idx in range(args.gradient_accumulation_steps):
+            example = train_sampler(step, micro_idx)
+            train_sample_answer_counts[example.answer] += 1
             raw_loss = loss_for_example(model, tokenizer, example, args.method, args.k, args.device)
             (raw_loss / args.gradient_accumulation_steps).backward()
             micro_losses.append(float(raw_loss.detach().cpu()))
         optimizer.step()
         losses.append(sum(micro_losses) / len(micro_losses))
-        if step == 1 or step % max(1, args.steps // 4) == 0:
-            print({"step": step, "loss": round(losses[-1], 4)}, flush=True)
+        completed_steps = step
+        loss_ema = losses[-1] if loss_ema is None else 0.95 * loss_ema + 0.05 * losses[-1]
+
+        if step == 1 or step % log_interval == 0:
+            recent = losses[-min(len(losses), log_interval) :]
+            progress = {
+                "step": step,
+                "loss": round(losses[-1], 4),
+                "loss_ema": round(loss_ema, 4),
+                "loss_recent_mean": round(sum(recent) / len(recent), 4),
+                "elapsed_sec": round(time.time() - start_time, 1),
+                "sampled_answers": dict(sorted(train_sample_answer_counts.items())),
+            }
+            loss_history.append(progress)
+            print(progress, flush=True)
+
+        if (
+            train_probe_examples
+            and args.train_probe_interval_steps > 0
+            and step % args.train_probe_interval_steps == 0
+        ):
+            probe = evaluate(
+                model,
+                tokenizer,
+                train_probe_examples,
+                args.method,
+                args.k,
+                args.device,
+                args.max_new_tokens,
+                args.eval_mode,
+                0,
+            )
+            probe_output = metric_for_output(probe, include_records=False)
+            probe_record = {
+                "step": step,
+                "elapsed_sec": round(time.time() - start_time, 1),
+                **probe_output,
+            }
+            train_probe_history.append(probe_record)
+            print(
+                {
+                    "step": step,
+                    "train_probe_accuracy": round(probe_output["accuracy"], 4),
+                    "train_probe_predictions": probe_output.get("prediction_counts", {}),
+                },
+                flush=True,
+            )
+
+        if args.save_checkpoint is not None and args.checkpoint_interval_steps > 0 and step % args.checkpoint_interval_steps == 0:
+            checkpoint_saved = save_training_checkpoint(
+                model,
+                args,
+                trainable,
+                total,
+                checkpoint_path=checkpoint_path_for_step(args.save_checkpoint, step),
+                completed_steps=step,
+            )
 
     if args.save_checkpoint is not None:
-        save_training_checkpoint(model, args, trainable, total)
+        checkpoint_saved = save_training_checkpoint(
+            model,
+            args,
+            trainable,
+            total,
+            completed_steps=completed_steps,
+        )
 
     eval_splits = {
         "dev": dev_examples[: args.eval_examples],
@@ -178,6 +289,10 @@ def main() -> None:
         "data_preset": args.data_preset,
         "eval_mode": args.eval_mode,
         "steps": args.steps,
+        "train_steps_completed": completed_steps,
+        "stop_reason": stop_reason,
+        "max_train_seconds": args.max_train_seconds if args.max_train_seconds > 0 else None,
+        "train_sampling": args.train_sampling,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "k": args.k if args.method in {"soft", "latent"} else None,
         "use_lora": args.use_lora,
@@ -188,10 +303,16 @@ def main() -> None:
         "trainable_parameters": trainable,
         "total_parameters": total,
         "train_loss_last": losses[-1] if losses else None,
+        "train_loss_ema": loss_ema,
+        "loss_history": loss_history,
+        "train_sample_answer_counts": dict(sorted(train_sample_answer_counts.items())),
+        "train_probe_examples": len(train_probe_examples),
+        "train_probe_interval_steps": args.train_probe_interval_steps,
+        "train_probe_history": train_probe_history,
         "elapsed_sec": round(time.time() - start_time, 3),
         "checkpoint_loaded": str(args.load_checkpoint) if args.load_checkpoint is not None else None,
         "checkpoint_load_info": load_info,
-        "checkpoint_saved": str(args.save_checkpoint) if args.save_checkpoint is not None else None,
+        "checkpoint_saved": checkpoint_saved,
         **output_eval_results,
     }
     diagnostics = run_diagnostics(args, eval_results)
@@ -242,6 +363,58 @@ def split_sizes(preset: str):
     raise ValueError(f"Unknown data preset: {preset}")
 
 
+def make_training_sampler(examples: list[Example], sampling: str, seed: int):
+    rng = random.Random(seed)
+    if sampling == "random":
+        return lambda step, micro_idx: rng.choice(examples)
+    if sampling != "balanced_answer":
+        raise ValueError(f"Unknown train sampling mode: {sampling}")
+
+    buckets: dict[str, list[Example]] = defaultdict(list)
+    for example in examples:
+        buckets[example.answer].append(example)
+    labels = sorted(label for label, bucket in buckets.items() if bucket)
+    if len(labels) < 2:
+        return lambda step, micro_idx: rng.choice(examples)
+
+    def sample(step: int, micro_idx: int) -> Example:
+        label = labels[((step - 1) + micro_idx) % len(labels)]
+        return rng.choice(buckets[label])
+
+    return sample
+
+
+def select_balanced_examples(examples: list[Example], count: int, seed: int) -> list[Example]:
+    if count <= 0:
+        return []
+
+    rng = random.Random(seed)
+    buckets: dict[str, list[Example]] = defaultdict(list)
+    for example in examples:
+        buckets[example.answer].append(example)
+    labels = sorted(label for label, bucket in buckets.items() if bucket)
+    if len(labels) < 2:
+        sample = list(examples)
+        rng.shuffle(sample)
+        return sample[:count]
+
+    selected = []
+    per_label = max(1, count // len(labels))
+    for label in labels:
+        bucket = list(buckets[label])
+        rng.shuffle(bucket)
+        selected.extend(bucket[:per_label])
+    remaining = [example for example in examples if example not in selected]
+    rng.shuffle(remaining)
+    selected.extend(remaining[: max(0, count - len(selected))])
+    rng.shuffle(selected)
+    return selected[:count]
+
+
+def checkpoint_path_for_step(path: Path, step: int) -> Path:
+    return path.with_name(f"{path.stem}_step{step}{path.suffix}")
+
+
 def lora_target_modules(args: argparse.Namespace) -> list[str]:
     return [name.strip() for name in args.lora_target_modules.split(",") if name.strip()]
 
@@ -287,10 +460,20 @@ def continuous_adapter_state(model) -> dict:
     }
 
 
-def save_training_checkpoint(model, args: argparse.Namespace, trainable_parameters: int, total_parameters: int) -> None:
+def save_training_checkpoint(
+    model,
+    args: argparse.Namespace,
+    trainable_parameters: int,
+    total_parameters: int,
+    checkpoint_path: Path | None = None,
+    completed_steps: int | None = None,
+) -> str:
     import torch
 
-    args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    path = checkpoint_path or args.save_checkpoint
+    if path is None:
+        raise ValueError("checkpoint_path is required when args.save_checkpoint is not set")
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "checkpoint_format": "fdt_qwen_v1",
         "model_name_or_path": args.model_name_or_path,
@@ -300,6 +483,8 @@ def save_training_checkpoint(model, args: argparse.Namespace, trainable_paramete
         "data_preset": args.data_preset,
         "k": args.k if args.method in {"soft", "latent"} else None,
         "steps": args.steps,
+        "completed_steps": completed_steps,
+        "train_sampling": getattr(args, "train_sampling", "random"),
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "seed": args.seed,
         "use_lora": args.use_lora,
@@ -321,7 +506,8 @@ def save_training_checkpoint(model, args: argparse.Namespace, trainable_paramete
     else:
         payload["lora_state"] = None
         payload["model_state"] = {key: value.detach().cpu() for key, value in model.state_dict().items()}
-    torch.save(payload, args.save_checkpoint)
+    torch.save(payload, path)
+    return str(path)
 
 
 def load_training_checkpoint(model, checkpoint_path: Path) -> dict:
@@ -572,10 +758,33 @@ def records_to_metric(records: list[dict], case_examples: int, include_records: 
         "num_examples": len(records),
         "samples": samples,
         "cases": cases,
+        "expected_counts": count_record_values(records, "expected"),
+        "prediction_counts": count_record_values(records, "parsed"),
     }
+    yes_no_margin = yes_minus_no_nll_margin(records)
+    if yes_no_margin is not None:
+        metric["mean_yes_minus_no_nll"] = yes_no_margin
     if include_records:
         metric["records"] = records
     return metric
+
+
+def count_record_values(records: list[dict], key: str) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        counts[str(record.get(key, "missing"))] += 1
+    return dict(sorted(counts.items()))
+
+
+def yes_minus_no_nll_margin(records: list[dict]) -> float | None:
+    margins = []
+    for record in records:
+        scores = record.get("scores")
+        if isinstance(scores, dict) and "YES" in scores and "NO" in scores:
+            margins.append(float(scores["YES"]) - float(scores["NO"]))
+    if not margins:
+        return None
+    return sum(margins) / len(margins)
 
 
 def metric_for_output(metric: dict, include_records: bool) -> dict:

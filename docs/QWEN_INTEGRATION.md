@@ -184,6 +184,27 @@ scripts/with_conda_npu.sh scripts/run_qwen_lora_matrix.sh
 
 `hard_ladder` 的训练 split 使用 6-10 个节点、YES 样本最短路径长度 1-3；OOD split 使用 12-16 个节点、YES 样本最短路径长度 4-8。它用于检验方法在更长隐式搜索链和更大图上的泛化，而不是只验证基础问答格式是否可学。
 
+长时间验证可使用 launcher：
+
+```bash
+scripts/launch_qwen_48h_matrix.sh
+```
+
+默认会启动 12 个 tmux job，使用完整空闲的 Ascend chip ID `0 1 2 3 4 5 6 7 10 11 12 13`，覆盖：
+
+```text
+direct seed 0/1
+masked_cot seed 0/1
+latent k=1/4/8 seed 0/1
+soft k=4 seed 0/1
+```
+
+每个 job 默认训练 48 小时：`MAX_TRAIN_SECONDS=172800`，使用 `balanced_answer` 采样，周期性写 loss/probe 日志，并保存中间 checkpoint。查看汇总：
+
+```bash
+PYTHONPATH=src python scripts/summarize_qwen_long_run.py
+```
+
 checkpoint 支持：
 
 ```bash
