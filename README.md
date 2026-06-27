@@ -8,6 +8,13 @@ The central hypothesis is:
 
 > Slow thinking is useful, but natural-language thinking tokens are a noisy and expensive carrier. If the thinking phase is relaxed from discrete vocabulary tokens into continuous embedding or hidden-state space, a language model may get a better accuracy-compute tradeoff on complex tasks.
 
+## Project Documents
+
+- Current research rationale: [docs/RESEARCH_RATIONALE_ZH.md](docs/RESEARCH_RATIONALE_ZH.md)
+- Full original research note: [docs/research/FUZZY_DEEP_THINKER_RESEARCH_NOTE_ZH.md](docs/research/FUZZY_DEEP_THINKER_RESEARCH_NOTE_ZH.md)
+- Literature notes: [docs/LITERATURE_NOTES_ZH.md](docs/LITERATURE_NOTES_ZH.md)
+- Active experiments: [docs/ACTIVE_EXPERIMENTS.md](docs/ACTIVE_EXPERIMENTS.md)
+
 ## Background
 
 Recent work raises doubts about treating intermediate tokens as faithful reasoning traces. The key concern is not that chain-of-thought is useless, but that natural-language intermediate text may be:

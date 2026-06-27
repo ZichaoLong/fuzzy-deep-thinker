@@ -13,6 +13,8 @@
 
 本轮实验用于验证：在更长训练时间、balanced answer sampling、训练期 probe 和多配置并行下，Qwen LoRA 是否能在 `graph_reachability/hard_ladder` 上学到超过标签偏置的能力，并比较 discrete/continuous thinking 配置。
 
+对应研究依据：`docs/RESEARCH_RATIONALE_ZH.md`。本轮是其中 fixed-K continuous thinking 假设的第一轮 Qwen 长训练验证。
+
 ## 训练设置
 
 - 模型：`Qwen/Qwen3-0.6B-Base`，实际使用本地 Hugging Face cache snapshot。
